@@ -9,14 +9,18 @@ from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv())
 
 # ---------------------------------------------------------
-# THE GOLDEN STATE (What Vali knows is in the Clever Sandbox)
+# THE GOLDEN STATE (Day 1: Baseline Ingestion)
 # ---------------------------------------------------------
-# As the Clever expert, you can expand this later. For v1, 
-# we expect the partner to have ingested 2 active users and 
-# archived 1 user that was previously unshared.
 EXPECTED_STATE = {
-    "expected_active_ids": ["clever_stu_001", "clever_tch_002"],
-    "expected_archived_ids": ["clever_stu_003"] # Unshared student
+    "required_clever_ids": [
+        "738733110", # Long Username Test (Scenario 26)
+        "841688312", # No Username Test (Scenario 31)
+        "48",        # Quote in Email Test (Scenario 8)
+        "69",        # Missing @ in Email Test (Scenario 9)
+        "4",         # Admin in Mult-Schools (Scenario 3)
+        "50"         # Teacher without Enrollment (Scenario 18)
+    ],
+    "numeric_sections": ["581", "582"] # Nonsense Names (Scenario 4)
 }
 
 def fetch_diagnostic_data(endpoint_url):
@@ -36,50 +40,37 @@ def evaluate_integration(partner_data):
     overall_pass = True
 
     # Check 1: Did they actually return a user array?
-    users = partner_data.get("users", [])
-    if not users:
+    # (Using 'is None' because an empty list [] is technically a valid response if the DB is empty)
+    users = partner_data.get("users")
+    if users is None:
         return [{"requirement": "Diagnostic Endpoint Schema", "status": "FAIL", "details": "No 'users' array found in the response."}], False
 
     # Extract Partner State
     partner_active_ids = [u.get("clever_id") for u in users if u.get("status") == "active"]
     partner_archived_ids = [u.get("clever_id") for u in users if u.get("status") == "archived"]
 
-    # Check 2: Core Data Ingestion (Did they get the active users?)
-    missing_active = [uid for uid in EXPECTED_STATE["expected_active_ids"] if uid not in partner_active_ids]
+    # Check 2: Core Data Ingestion (Did they ingest the Day 1 Edge Cases without crashing?)
+    required_ids = EXPECTED_STATE.get("required_clever_ids", [])
+    partner_active_sis_ids = [u.get("sis_id") for u in users if u.get("status") == "active" and u.get("sis_id")]
+    missing_active = [uid for uid in required_ids if uid not in partner_active_ids]
+    
     if missing_active:
         results.append({
-            "requirement": "Utilize all relevant data (Ingestion)",
+            "requirement": "Utilize all relevant data (Edge Case Ingestion)",
             "status": "FAIL",
-            "details": f"Missing expected active Clever IDs: {missing_active}"
+            "details": f"Missing expected SIS IDs: {missing_active}. App may have crashed on edge cases, or token lacks scope to read sis_id."
         })
         overall_pass = False
     else:
         results.append({
-            "requirement": "Utilize all relevant data (Ingestion)",
+            "requirement": "Utilize all relevant data (Edge Case Ingestion)",
             "status": "PASS",
-            "details": "All expected active Clever IDs successfully ingested."
+            "details": "All Day 1 edge case records successfully ingested."
         })
 
-    # Check 3: Archival Logic (Did they archive instead of hard-delete?)
-    missing_archived = [uid for uid in EXPECTED_STATE["expected_archived_ids"] if uid not in partner_archived_ids]
-    if missing_archived:
-        results.append({
-            "requirement": "Archive unshared records",
-            "status": "FAIL",
-            "details": f"Expected Clever IDs to be archived, but missing: {missing_archived}. Check if app hard-deleted them."
-        })
-        overall_pass = False
-    else:
-        results.append({
-            "requirement": "Archive unshared records",
-            "status": "PASS",
-            "details": "Successfully archived unshared Clever IDs."
-        })
-
-    # Check 4: Primary Key Usage (No duplicates)
-    # If the partner has multiple entries for the same Clever ID, they aren't using it as the Primary Key
-    all_partner_ids = [u.get("clever_id") for u in users]
-    if len(all_partner_ids) != len(set(all_partner_ids)):
+    # Check 3: Primary Identifier Usage (No duplicates)
+    all_partner_clever_ids = [u.get("clever_id") for u in users if u.get("clever_id")]
+    if len(all_partner_clever_ids) != len(set(all_partner_clever_ids)):
         results.append({
             "requirement": "Use Clever ID as primary identifier",
             "status": "FAIL",
