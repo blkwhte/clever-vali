@@ -1,0 +1,20 @@
+{
+  "last_sync": "2026-04-30T10:00:00Z",
+  "users": [
+    {
+      "clever_id": "clever_stu_001",
+      "app_user_id": "101",
+      "status": "active"
+    },
+    {
+      "clever_id": "clever_tch_002",
+      "app_user_id": "102",
+      "status": "active"
+    },
+    {
+      "clever_id": "clever_stu_003",
+      "app_user_id": "103",
+      "status": "archived"
+    }
+  ]
+}
