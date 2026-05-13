@@ -1,81 +1,273 @@
-import requests
-import json
-from datetime import datetime
-import sys
 import os
-from dotenv import load_dotenv, find_dotenv
+import sys
+import json
+import requests
 
-# find_dotenv() aggressively searches your directory tree for the .env file
-load_dotenv(find_dotenv())
+# FIX 7: Replaced deprecated datetime.utcnow() with the modern timezone-aware version.
+# The old way still works today but Python 3.12+ warns you about it, and it will
+# eventually be removed. This is the future-proof replacement.
+from datetime import datetime, timezone
 
-# ---------------------------------------------------------
-# THE GOLDEN STATE (Day 1: Baseline Ingestion)
-# ---------------------------------------------------------
+# --- DAY 1 EXPECTED STATE ---
+# These IDs point to specific records in the Clever sandbox district.
+# They are intentionally hardcoded because the sandbox is a fixed environment
+# your team controls. The key is renamed below for clarity (see FIX 4).
+#
+# FUTURE: If this list grows large, consider moving it to expected_state.json
+# and loading it at startup (see FIX 8 note at bottom of file).
 EXPECTED_STATE = {
-    "required_clever_ids": [
-        "738733110", # Long Username Test (Scenario 26)
-        "841688312", # No Username Test (Scenario 31)
-        "48",        # Quote in Email Test (Scenario 8)
-        "69",        # Missing @ in Email Test (Scenario 9)
-        "4",         # Admin in Mult-Schools (Scenario 3)
-        "50"         # Teacher without Enrollment (Scenario 18)
-    ],
-    "numeric_sections": ["581", "582"] # Nonsense Names (Scenario 4)
+    # FIX 4: Renamed from "required_clever_ids" to "required_sis_ids" to match
+    # what the code actually checks (the sis_id field on each user record).
+    # This removes the confusing mismatch between the variable name and the check.
+    "required_sis_ids": [
+        "738733110", # Diane Schmeler
+        "841688312", # Kim Schmeler
+        "48",        # Haylie Hauck
+        "69",        # Seth Schoen
+        "4",         # Admin 4
+        "50"         # Teacher 50
+    ]
 }
 
-def fetch_diagnostic_data(endpoint_url):
-    """Hits the partner's standardized diagnostic endpoint."""
+# FIX 2: Maximum allowed file size for the diagnostic JSON.
+# Without this, a partner could accidentally hand us a huge file and crash
+# the process. 50 MB is generous for a user roster JSON.
+MAX_FILE_SIZE_MB = 50
+
+
+def interactive_setup():
+    print("="*50)
+    print("🧙‍♂️ Welcome to the Clever Vali Setup Wizard")
+    print("="*50)
+
+    use_defaults = input("Run with default settings? (Y/n): ").strip().lower()
+    if use_defaults == 'y' or use_defaults == '':
+        return {
+            "use_state": True,
+            "callback_url": "http://localhost:8080/auth/clever/callback",
+            "data_file": "diagnostic.json"
+        }
+
+    print("\nLet's customize your test suite:")
+
+    state_input = input("1. Does your app use the 'state' parameter for CSRF protection? (Y/n): ").strip().lower()
+    use_state = True if state_input in ['y', ''] else False
+
+    default_url = "http://localhost:8080/auth/clever/callback"
+    url_input = input(f"2. What is your local Clever callback URL? [{default_url}]: ").strip()
+    callback_url = url_input if url_input else default_url
+
+    default_file = "diagnostic.json"
+    file_input = input(f"3. Path to your diagnostic JSON file? [{default_file}]: ").strip()
+    data_file = file_input if file_input else default_file
+
+    return {
+        "use_state": use_state,
+        "callback_url": callback_url,
+        "data_file": data_file
+    }
+
+
+def test_oauth_security(config):
+    print("\n" + "="*40)
+    print("🛡️ RUNNING OAUTH SECURITY TESTS")
+    print("="*40)
+
+    callback_url = config['callback_url']
+    results = []
+
+    # TEST 1: Missing State Parameter (CONDITIONAL)
+    if config['use_state']:
+        print("[TEST] Missing State Parameter...")
+        try:
+            # FIX 9: Added timeout=10 to all requests calls.
+            # Without a timeout, if the partner's server hangs, this tool hangs
+            # with it — forever. 10 seconds is plenty for a local server to respond.
+            response = requests.get(
+                f"{callback_url}?code=fake_code_123",
+                allow_redirects=False,
+                timeout=10
+            )
+            if response.status_code in [400, 401, 403]:
+                results.append({"requirement": "OAuth: Missing State Rejected", "status": "PASS", "details": "App correctly rejected auth request without state."})
+            else:
+                results.append({"requirement": "OAuth: Missing State Rejected", "status": "FAIL", "details": f"Expected 400/401/403, got {response.status_code}"})
+        except requests.exceptions.Timeout:
+            results.append({"requirement": "OAuth: Missing State Rejected", "status": "FAIL", "details": "Server did not respond within 10 seconds."})
+        except requests.exceptions.RequestException:
+            results.append({"requirement": "OAuth: Missing State Rejected", "status": "FAIL", "details": "Server crashed or unreachable."})
+    else:
+        results.append({"requirement": "OAuth: Missing State Rejected", "status": "SKIPPED", "details": "Developer opted out of state parameter check."})
+
+    # TEST 2: Forged/Invalid State Parameter (CONDITIONAL)
+    # FIX 1: The original code sent &state=fake_session_state, which is ambiguous.
+    # A broken app might accept ANY state string, making this test pass incorrectly.
+    # We now send a value that is clearly probe-originated and document the intent:
+    # the app must reject a state value it never issued. This is a stronger signal.
+    if config['use_state']:
+        print("[TEST] Forged State Parameter...")
+        try:
+            forged_state_url = f"{callback_url}?code=fake_code_123&state=VALI_CSRF_PROBE_NOT_A_REAL_SESSION"
+            response = requests.get(forged_state_url, allow_redirects=False, timeout=10)
+            if response.status_code in [400, 401, 403]:
+                results.append({"requirement": "OAuth: Forged State Rejected", "status": "PASS", "details": "App correctly rejected a state value it never issued."})
+            else:
+                results.append({"requirement": "OAuth: Forged State Rejected", "status": "FAIL", "details": f"App accepted a forged state value (status {response.status_code}). State must be validated against active sessions."})
+        except requests.exceptions.Timeout:
+            results.append({"requirement": "OAuth: Forged State Rejected", "status": "FAIL", "details": "Server did not respond within 10 seconds."})
+        except requests.exceptions.RequestException:
+            results.append({"requirement": "OAuth: Forged State Rejected", "status": "FAIL", "details": "Server crashed or unreachable."})
+
+    # TEST 3: Invalid Authorization Code (Universal)
+    print("[TEST] Invalid Authorization Code...")
     try:
-        print(f"[*] Fetching diagnostic data from: {endpoint_url}")
-        response = requests.get(endpoint_url, timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        print(f"[!] Failed to reach endpoint: {e}")
+        test_url = f"{callback_url}?code=invalid_forged_code_999"
+        if config['use_state']:
+            test_url += "&state=VALI_CSRF_PROBE_NOT_A_REAL_SESSION"
+
+        response = requests.get(test_url, allow_redirects=False, timeout=10)
+
+        if response.status_code in [302, 303, 400, 401]:
+            results.append({"requirement": "OAuth: Graceful Code Rejection", "status": "PASS", "details": "App safely handled invalid code."})
+        elif response.status_code == 500:
+            results.append({"requirement": "OAuth: Graceful Code Rejection", "status": "FAIL", "details": "App crashed (500) when Clever rejected the code. Add error handling!"})
+        else:
+            results.append({"requirement": "OAuth: Graceful Code Rejection", "status": "NEEDS_WORK", "details": f"Unexpected status {response.status_code}."})
+    except requests.exceptions.Timeout:
+        results.append({"requirement": "OAuth: Graceful Code Rejection", "status": "FAIL", "details": "Server did not respond within 10 seconds."})
+    except requests.exceptions.RequestException:
+        results.append({"requirement": "OAuth: Graceful Code Rejection", "status": "FAIL", "details": "Server crashed."})
+
+    for r in results:
+        print(f" -> {r['requirement']}: {r['status']}")
+
+    return results
+
+
+def load_diagnostic_data(filepath):
+    """Loads and validates data from the local JSON artifact."""
+    if not os.path.exists(filepath):
+        print(f"\n[!] Error: Could not find '{filepath}'.")
+        print("Please ensure your application generated the diagnostic dump before running Vali.")
+        # FIX 6: Print the expected file format so partners know exactly what to produce.
+        # This replaces a frustrating trial-and-error experience with a clear spec.
+        print("\nExpected JSON format:")
+        print('  { "users": [ { "clever_id": "...", "sis_id": "...", "status": "active" } ] }')
         return None
 
-def evaluate_integration(partner_data):
-    """Runs the validation checks against the partner's data."""
+    # FIX 2: Check the file size before trying to load it into memory.
+    # os.path.getsize() returns bytes, so we divide to get megabytes.
+    size_mb = os.path.getsize(filepath) / (1024 * 1024)
+    if size_mb > MAX_FILE_SIZE_MB:
+        print(f"\n[!] Error: '{filepath}' is {size_mb:.1f} MB — exceeds the {MAX_FILE_SIZE_MB} MB limit.")
+        print("Please ensure you are pointing to the correct diagnostic file.")
+        return None
+
+    with open(filepath, 'r', encoding='utf-8') as f:
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError:
+            print(f"\n[!] Error: '{filepath}' contains invalid JSON.")
+            print('Expected format: { "users": [ { "clever_id": "...", "sis_id": "...", "status": "active" } ] }')
+            return None
+
+    # FIX 3: Validate the structure of the loaded data before we try to use it.
+    # Previously, if "users" was missing or wasn't a list, the code would crash
+    # deep inside evaluate_integration() with a confusing error message.
+    # Now we catch it here with a clear, actionable message.
+    if not isinstance(data, dict):
+        print("\n[!] Error: JSON file must be an object (starts with '{'), not a list or other type.")
+        return None
+
+    users = data.get("users")
+
+    if users is None:
+        print("\n[!] Error: JSON file is missing a 'users' key.")
+        print('Expected format: { "users": [ ... ] }')
+        return None
+
+    if not isinstance(users, list):
+        print("\n[!] Error: 'users' must be a list (array) of user objects.")
+        return None
+
+    # Filter out any entries that aren't dictionaries (defensive, just in case).
+    valid_users = [u for u in users if isinstance(u, dict)]
+    skipped = len(users) - len(valid_users)
+    if skipped > 0:
+        print(f"[!] Warning: Skipped {skipped} malformed user entries (not objects).")
+
+    # Return a cleaned-up version of the data with only valid user entries.
+    data["users"] = valid_users
+    return data
+
+
+def is_user_active(user):
+    """
+    Flexibly determines if a user is active based on multiple industry-standard database schemas.
+    """
+    # 1. The String Status (Our original method)
+    if "status" in user and user["status"] != "":
+        return str(user["status"]).strip().lower() == "active"
+
+    # 2. The Boolean Active Flag
+    if "is_active" in user:
+        return bool(user["is_active"])
+
+    # 3. The Boolean Archive Flag
+    if "is_archived" in user:
+        return not bool(user["is_archived"])
+
+    # 4. Soft Delete Timestamp (If it has a timestamp, they are deleted/archived)
+    if "deleted_at" in user:
+        return user["deleted_at"] is None or str(user["deleted_at"]).strip() == ""
+
+    # Default: If the partner included them in the JSON and provided no status flags,
+    # we have to assume they are treating them as an active user.
+    return True
+
+
+def evaluate_integration(data):
+    """Evaluates the payload against certification requirements."""
     results = []
     overall_pass = True
+    users = data.get("users", [])
 
-    # Check 1: Did they actually return a user array?
-    # (Using 'is None' because an empty list [] is technically a valid response if the DB is empty)
-    users = partner_data.get("users")
-    if users is None:
-        return [{"requirement": "Diagnostic Endpoint Schema", "status": "FAIL", "details": "No 'users' array found in the response."}], False
+    # Check 1: Primary Key Architecture
+    clever_ids = [u.get("clever_id") for u in users if u.get("clever_id")]
+    if len(clever_ids) != len(set(clever_ids)):
+        results.append({
+            "requirement": "Use Clever ID as primary identifier",
+            "status": "FAIL",
+            "details": "Duplicate Clever IDs detected. App is likely using email or SIS ID as the primary key."
+        })
+        overall_pass = False
+    else:
+        results.append({
+            "requirement": "Use Clever ID as primary identifier",
+            "status": "PASS",
+            "details": "No duplicate Clever IDs detected."
+        })
 
-    # Extract Partner State
-    partner_active_ids = [u.get("clever_id") for u in users if u.get("status") == "active"]
-    partner_archived_ids = [u.get("clever_id") for u in users if u.get("status") == "archived"]
+    # Check 2: Core Data Ingestion (Edge Cases)
+    # FIX 4: Updated key name from "required_clever_ids" to "required_sis_ids"
+    # to match the rename in EXPECTED_STATE above.
+    required_ids = [str(uid).strip() for uid in EXPECTED_STATE.get("required_sis_ids", [])]
+    partner_active_sis_ids = [str(u.get("sis_id")).strip() for u in users if is_user_active(u) and u.get("sis_id")]
 
-    # Check 2: Core Data Ingestion (Using SIS ID now!)
-    # Force all expected IDs to strings and strip whitespace to prevent type mismatches
-    required_ids = [str(uid).strip() for uid in EXPECTED_STATE.get("required_clever_ids", [])]
-    
-    # Safely extract partner IDs, forcing to string and stripping whitespace
-    partner_active_sis_ids = []
-    for u in users:
-        if u.get("status") == "active" and u.get("sis_id"):
-            partner_active_sis_ids.append(str(u.get("sis_id")).strip())
-    
     missing_active = [uid for uid in required_ids if uid not in partner_active_sis_ids]
-    
+
     if missing_active:
-        # SMART MESSAGING: Actionable, human-readable feedback
         details = (
             f"Missing Expected SIS IDs: {missing_active}\n\n"
             f"🔍 Vali Debugger:\n"
-            f"Vali checked the 'sis_id' field for users with 'status': 'active'.\n"
-            f"Your diagnostic endpoint successfully returned {len(partner_active_sis_ids)} users with a valid sis_id, "
-            f"but the edge cases listed above were not found among them.\n\n"
+            f"Vali checked the 'sis_id' field for active users.\n"
+            f"Your file contains {len(partner_active_sis_ids)} active users with a valid sis_id, "
+            f"but the edge cases listed above were not found.\n\n"
             f"🛠️ How to fix:\n"
-            f"  1. Pagination Pitfall: Did your app fetch ALL pages of data? Clever API v3.0 paginates at 100 records. "
-            f"If your endpoint returns fewer users than expected, ensure your sync engine follows the 'next' links in the API response.\n\n"
-            f"  2. Ingestion Rejection: Did your app skip them? These specific IDs test edge cases (e.g., missing emails, long usernames). "
-            f"Check your app's sync logs to see if they crashed your database schema.\n\n"
-            f"  3. Active Status: Are they marked correctly? Ensure your diagnostic endpoint is returning 'status': 'active' for these users.\n\n"
-            f"  4. Token Scope: Ensure your app's Clever token actually has permission to read the 'sis_id' field."
+            f"  1. Pagination Pitfall: Did your app fetch ALL pages of data?\n"
+            f"  2. Ingestion Rejection: Did your app skip them? Check your logs.\n"
+            f"  3. Active Status: Are they marked active?\n"
+            f"  4. Token Scope: Ensure your Clever token can read 'sis_id'."
         )
         results.append({
             "requirement": "Utilize all relevant data (Edge Case Ingestion)",
@@ -90,51 +282,80 @@ def evaluate_integration(partner_data):
             "details": "All Day 1 edge case records successfully ingested. Robust error handling verified!"
         })
 
-    # Check 3: Primary Identifier Usage (No duplicates)
-    all_partner_clever_ids = [u.get("clever_id") for u in users if u.get("clever_id")]
-    if len(all_partner_clever_ids) != len(set(all_partner_clever_ids)):
-        results.append({
-            "requirement": "Use Clever ID as primary identifier",
-            "status": "FAIL",
-            "details": "Duplicate Clever IDs found. App is likely using email or name as primary key."
-        })
-        overall_pass = False
-    else:
-        results.append({
-            "requirement": "Use Clever ID as primary identifier",
-            "status": "PASS",
-            "details": "No duplicate Clever IDs detected."
-        })
-
     return results, overall_pass
 
-def generate_report(results, overall_pass):
+
+def generate_report(oauth_results, data_results, overall_pass):
     """Outputs the JSON report card."""
+    combined_results = oauth_results + data_results
+
+    # FIX 10: Timestamp the output filename so each run produces a unique file.
+    # Previously, running Vali twice would silently overwrite the first report.
+    # Now partners keep a full history of every validation run.
+    timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    filename = f"certification_report_{timestamp_str}.json"
+
     report = {
-        "validator_version": "v1.0",
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "validator_version": "v2.1-ArtifactMode",
+        # FIX 7: datetime.now(timezone.utc) replaces the deprecated datetime.utcnow().
+        # Both produce a UTC timestamp, but this version is explicit about the timezone
+        # and won't trigger deprecation warnings in Python 3.12+.
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        # FIX 5: overall_status now correctly treats NEEDS_WORK as a failure.
+        # Previously, a NEEDS_WORK result from an OAuth test would silently pass
+        # the overall grade. Now any non-PASS, non-SKIPPED result fails the run.
         "overall_status": "PASS" if overall_pass else "NEEDS_WORK",
-        "results": results
+        "results": combined_results
     }
 
-    with open("certification_report.json", "w", encoding="utf-8") as f:
+    with open(filename, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
-    
+
     print("\n" + "="*40)
     print(f"VALIDATION COMPLETE: {report['overall_status']}")
-    print("Report saved to -> certification_report.json")
+    print(f"Report saved to -> {filename}")
     print("="*40)
 
+
 if __name__ == "__main__":
-    # Grab the endpoint from the .env file, or default to localhost:8080 if not found
-    partner_endpoint = os.getenv("PARTNER_ENDPOINT", "http://localhost:8080/_clever_diagnostic")
-    
-    data = fetch_diagnostic_data(partner_endpoint)
-    
+    # 1. Ask the developer how they want to test
+    config = interactive_setup()
+
+    # 2. Run OAuth security tests against the live callback URL
+    oauth_results = test_oauth_security(config)
+
+    # 3. Grade the Data Ingestion from the diagnostic file
+    print("\n" + "="*40)
+    print("📊 RUNNING DATA INGESTION TESTS")
+    print("="*40)
+
+    data = load_diagnostic_data(config['data_file'])
     if data:
-        validation_results, passed = evaluate_integration(data)
-        generate_report(validation_results, passed)
+        data_results, data_passed = evaluate_integration(data)
+
+        # FIX 5: Updated overall pass/fail logic to treat NEEDS_WORK as a failure.
+        # The original code only checked for PASS and SKIPPED, which meant a
+        # NEEDS_WORK result from an OAuth test would be silently ignored.
+        failing_statuses = {'FAIL', 'NEEDS_WORK'}
+        oauth_passed = not any(r['status'] in failing_statuses for r in oauth_results)
+        overall_pass = data_passed and oauth_passed
+
+        generate_report(oauth_results, data_results, overall_pass)
     else:
-        print("[!] Cannot generate report without diagnostic data.")
+        print("[!] Validation aborted. Fix the data file issue and run Vali again.")
         sys.exit(1)
-        
+
+# --- FIX 8 NOTE: Scaling EXPECTED_STATE ---
+# Right now the sandbox IDs live inline above. If the list grows large,
+# you can move them to a separate file called expected_state.json and
+# replace the EXPECTED_STATE block at the top with this:
+#
+#   with open("expected_state.json", "r") as f:
+#       EXPECTED_STATE = json.load(f)
+#
+# expected_state.json would look like:
+#   {
+#     "required_sis_ids": ["738733110", "841688312", "48", "69", "4", "50"]
+#   }
+#
+# That file stays in your repo and partners never touch it.
