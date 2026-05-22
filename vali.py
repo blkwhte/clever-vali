@@ -16,16 +16,21 @@ from datetime import datetime, timezone
 # FUTURE: If this list grows large, consider moving it to expected_state.json
 # and loading it at startup (see FIX 8 note at bottom of file).
 EXPECTED_STATE = {
-    # FIX 4: Renamed from "required_clever_ids" to "required_sis_ids" to match
-    # what the code actually checks (the sis_id field on each user record).
-    # This removes the confusing mismatch between the variable name and the check.
-    "required_sis_ids": [
-        "738733110", # Diane Schmeler
-        "841688312", # Kim Schmeler
-        "48",        # Haylie Hauck
-        "69",        # Seth Schoen
-        "4",         # Admin 4
-        "50"         # Teacher 50
+    # Each entry is a dict with three fields:
+    #   sis_id  — the value Vali looks for in the partner's diagnostic file
+    #   name    — the sandbox user's display name (for human-readable error output)
+    #   role    — the Clever role: "student", "teacher", or "admin"
+    #
+    # Having the role here lets Vali tell partners *why* a record is missing,
+    # not just *which* one — e.g. "all missing records are admins" points straight
+    # to a role-filtering bug or a missing token scope.
+    "required_users": [
+        {"sis_id": "738733110", "name": "Diane Schmeler", "role": "student"},
+        {"sis_id": "841688312", "name": "Kim Schmeler",   "role": "student"},
+        {"sis_id": "48",        "name": "Haylie Hauck",   "role": "student"},
+        {"sis_id": "69",        "name": "Seth Schoen",    "role": "student"},
+        {"sis_id": "4",         "name": "Admin 4",        "role": "admin"},
+        {"sis_id": "50",        "name": "Teacher 50",     "role": "teacher"},
     ]
 }
 
@@ -249,25 +254,59 @@ def evaluate_integration(data):
         })
 
     # Check 2: Core Data Ingestion (Edge Cases)
-    # FIX 4: Updated key name from "required_clever_ids" to "required_sis_ids"
-    # to match the rename in EXPECTED_STATE above.
-    required_ids = [str(uid).strip() for uid in EXPECTED_STATE.get("required_sis_ids", [])]
-    partner_active_sis_ids = [str(u.get("sis_id")).strip() for u in users if is_user_active(u) and u.get("sis_id")]
+    # EXPECTED_STATE now stores each required user as a dict with sis_id, name, and role.
+    # We build a lookup of the partner's active SIS IDs once, then check each expected
+    # user against it individually so we can report exactly who is missing and what role
+    # they belong to.
+    required_users = EXPECTED_STATE.get("required_users", [])
+    partner_active_sis_ids = {
+        str(u.get("sis_id")).strip()
+        for u in users
+        if is_user_active(u) and u.get("sis_id")
+    }
 
-    missing_active = [uid for uid in required_ids if uid not in partner_active_sis_ids]
+    # Find which expected users are absent from the partner's file.
+    missing_users = [
+        ru for ru in required_users
+        if str(ru["sis_id"]).strip() not in partner_active_sis_ids
+    ]
 
-    if missing_active:
+    if missing_users:
+        # Group missing users by role so the error message highlights patterns
+        # (e.g. "all missing records are admins") rather than just listing IDs.
+        by_role = {}
+        for ru in missing_users:
+            by_role.setdefault(ru["role"], []).append(ru)
+
+        missing_lines = []
+        for role, records in sorted(by_role.items()):
+            for r in records:
+                missing_lines.append(f"  - [{role.upper()}] {r['name']} (sis_id: {r['sis_id']})")
+
+        # Build a role-specific hint if all missing records share the same role.
+        if len(by_role) == 1:
+            sole_role = list(by_role.keys())[0]
+            role_hint = (
+                f"  ⚠️  All missing records are role='{sole_role}'. "
+                f"This often means your app is filtering out {sole_role}s entirely, "
+                f"or your token lacks the scope to read them.\n"
+            )
+        else:
+            roles_affected = ", ".join(sorted(by_role.keys()))
+            role_hint = f"  ⚠️  Missing records span multiple roles: {roles_affected}.\n"
+
         details = (
-            f"Missing Expected SIS IDs: {missing_active}\n\n"
-            f"🔍 Vali Debugger:\n"
-            f"Vali checked the 'sis_id' field for active users.\n"
-            f"Your file contains {len(partner_active_sis_ids)} active users with a valid sis_id, "
-            f"but the edge cases listed above were not found.\n\n"
-            f"🛠️ How to fix:\n"
-            f"  1. Pagination Pitfall: Did your app fetch ALL pages of data?\n"
-            f"  2. Ingestion Rejection: Did your app skip them? Check your logs.\n"
-            f"  3. Active Status: Are they marked active?\n"
-            f"  4. Token Scope: Ensure your Clever token can read 'sis_id'."
+            f"Missing {len(missing_users)} of {len(required_users)} expected sandbox records:\n"
+            + "\n".join(missing_lines) + "\n\n"
+            + f"🔍 Vali Debugger:\n"
+            + role_hint
+            + f"  Your file contains {len(partner_active_sis_ids)} active users with a valid sis_id.\n\n"
+            + f"🛠️ How to fix:\n"
+            + f"  1. Pagination Pitfall: Did your app fetch ALL pages of data?\n"
+            + f"  2. Role Filtering: Is your app ignoring certain roles (student/teacher/admin)?\n"
+            + f"  3. Ingestion Rejection: Did your app skip them? Check your logs.\n"
+            + f"  4. Active Status: Are they marked active?\n"
+            + f"  5. Token Scope: Ensure your Clever token can read 'sis_id' for all roles."
         )
         results.append({
             "requirement": "Utilize all relevant data (Edge Case Ingestion)",
