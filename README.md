@@ -182,7 +182,7 @@ One or more expected sandbox users were not found in your `diagnostic.json`. The
 - **Active status:** Confirm the missing users are marked active in your system.
 - **Token scope:** Ensure your Clever API token has permission to read `sis_id` for all user types.
 
-You can read more about what edge cases are tested on this page of the (Clever Dev Docs)[https://dev.clever.com/docs/sync-testing#testing-with-certification-isd].
+You can read more about what edge cases are tested on this page of the Clever Dev Docs: https://dev.clever.com/docs/sync-testing#testing-with-certification-isd
 
 ---
 
