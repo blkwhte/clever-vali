@@ -217,7 +217,7 @@ These are evaluated by the Clever team as part of the standard certification rev
 
 ## Submitting Your Report
 
-Once Vali shows `overall_status: PASS`, include your `certification_report_*.json` file when you submit the [Clever Secure Sync Certification Form](https://airtable.com/appMaUPlogor33CWe/pagDqvB9KGNXFnQbO/form). This lets the Clever team verify your technical checks were completed and speeds up the review process.
+Once Vali shows `overall_status: PASS`, include your `certification_report_*.json` file when you submit the Clever Secure Sync Certification Form. This lets the Clever team verify your technical checks were completed and speeds up the review process.
 
 If you have questions about a failure you can't resolve, reach out to [integrations@clever.com](mailto:integrations@clever.com).
 
