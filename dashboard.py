@@ -163,7 +163,7 @@ DASHBOARD_HTML = """
         <div class="sb-logo">⚡ Vali</div>
         <div class="sb-sub">Clever certification dashboard</div>
       </div>
-      <button class="btn" id="sync-btn" onclick="syncAirtable()" title="Re-sync Airtable" style="padding:5px 8px;font-size:12px;">⟳</button>
+      <button class="btn" id="sync-btn" onclick="syncAirtable()" title="Re-sync Airtable data" style="padding:5px 10px;font-size:18px;line-height:1;border-radius:6px;">⟳</button>
     </div>
     <div class="sb-search">
       <input type="text" id="search" placeholder="Search partners..." oninput="filterPartners()" />
@@ -268,7 +268,7 @@ function renderMain(partner) {
 
     <div class="content">
       <div class="tab-panel active" id="tab-results">
-        ${status === 'NOT RUN'
+        ${(status === 'NOT RUN' || !results.length)
           ? `<div class="empty"><div class="empty-title">No tests run yet</div>Click "Run tests" to validate this partner's integration.</div>`
           : `
           <div class="metrics">
@@ -539,10 +539,13 @@ def api_run_tests(record_id):
             all_results = oauth_results + data_results
             write_vali_results(record_id, overall_status, all_results)
             _running_tests[record_id] = {"status": "done", "overall": overall_status}
+            # Clear after a short delay so re-runs aren't blocked by the 409 guard
+            import time as _time; _time.sleep(2); _running_tests.pop(record_id, None)
 
         except Exception as e:
             _running_tests[record_id] = {"status": "error", "message": str(e)}
             write_vali_results(record_id, "FAIL", [{"requirement": "Test runner error", "status": "FAIL", "details": str(e)}])
+            import time as _time; _time.sleep(2); _running_tests.pop(record_id, None)
 
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
