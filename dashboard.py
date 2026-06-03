@@ -158,9 +158,12 @@ DASHBOARD_HTML = """
 
   <!-- SIDEBAR -->
   <div class="sidebar">
-    <div class="sb-head">
-      <div class="sb-logo">⚡ Vali</div>
-      <div class="sb-sub">Clever certification dashboard</div>
+    <div class="sb-head" style="display:flex;align-items:center;justify-content:space-between;">
+      <div>
+        <div class="sb-logo">⚡ Vali</div>
+        <div class="sb-sub">Clever certification dashboard</div>
+      </div>
+      <button class="btn" id="sync-btn" onclick="syncAirtable()" title="Re-sync Airtable" style="padding:5px 8px;font-size:12px;">⟳</button>
     </div>
     <div class="sb-search">
       <input type="text" id="search" placeholder="Search partners..." oninput="filterPartners()" />
@@ -339,7 +342,7 @@ function renderAirtableFields(fields) {
 }
 
 // ---------------------------------------------------------------------------
-// Run tests
+// Run tests — polls until the background thread finishes, then refreshes
 // ---------------------------------------------------------------------------
 async function runTests(id) {
   const btn = document.getElementById('run-btn');
@@ -349,26 +352,69 @@ async function runTests(id) {
   if (badge) { badge.className = 'running-badge'; badge.innerHTML = '<div class="spinner"></div> Running'; }
 
   try {
-    const res = await fetch(`/api/run/${id}`, { method: 'POST' });
-    const data = await res.json();
+    await fetch(`/api/run/${id}`, { method: 'POST' });
 
-    // Refresh this partner's data from Airtable
-    const refreshed = await fetch(`/api/partners/${id}`);
-    const partner = await refreshed.json();
+    // Poll /api/status/:id every 2 seconds until the test thread is done.
+    // The background thread in dashboard.py updates _running_tests when
+    // it finishes, which this endpoint reflects.
+    await pollUntilDone(id);
 
-    // Update in local array
-    const idx = allPartners.findIndex(p => p.id === id);
-    if (idx !== -1) allPartners[idx] = partner;
-
-    renderSidebar(allPartners.filter(p => {
-      const q = document.getElementById('search').value.toLowerCase();
-      return !q || p.name.toLowerCase().includes(q) || (p.app_name||'').toLowerCase().includes(q);
-    }));
-    renderMain(partner);
+    // Now that the thread is done, fetch the freshly written Airtable data.
+    await refreshPartner(id);
   } catch(e) {
     btn.disabled = false;
     btn.textContent = '▶ Run tests';
     alert('Test run failed. Check the terminal for details.');
+  }
+}
+
+async function pollUntilDone(id, intervalMs=2000, maxAttempts=60) {
+  for (let i = 0; i < maxAttempts; i++) {
+    await new Promise(r => setTimeout(r, intervalMs));
+    try {
+      const res = await fetch(`/api/status/${id}`);
+      const data = await res.json();
+      if (data.status === 'done' || data.status === 'error') return;
+    } catch(_) {}
+  }
+}
+
+async function refreshPartner(id) {
+  const refreshed = await fetch(`/api/partners/${id}`);
+  const partner = await refreshed.json();
+  const idx = allPartners.findIndex(p => p.id === id);
+  if (idx !== -1) allPartners[idx] = partner;
+  renderSidebar(allPartners.filter(p => {
+    const q = document.getElementById('search').value.toLowerCase();
+    return !q || p.name.toLowerCase().includes(q) || (p.app_name||'').toLowerCase().includes(q);
+  }));
+  renderMain(partner);
+}
+
+// ---------------------------------------------------------------------------
+// Sync all partners from Airtable without losing current selection
+// ---------------------------------------------------------------------------
+async function syncAirtable() {
+  const btn = document.getElementById('sync-btn');
+  btn.textContent = '…';
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/partners');
+    allPartners = await res.json();
+    const q = document.getElementById('search').value.toLowerCase();
+    renderSidebar(allPartners.filter(p =>
+      !q || p.name.toLowerCase().includes(q) || (p.app_name||'').toLowerCase().includes(q)
+    ));
+    // Re-render the current partner if one is selected
+    if (currentId) {
+      const current = allPartners.find(p => p.id === currentId);
+      if (current) renderMain(current);
+    }
+  } catch(e) {
+    alert('Sync failed. Check your connection and try again.');
+  } finally {
+    btn.textContent = '⟳';
+    btn.disabled = false;
   }
 }
 
@@ -502,6 +548,13 @@ def api_run_tests(record_id):
     thread.start()
 
     return jsonify({"status": "started"})
+
+
+@app.route("/api/status/<record_id>")
+def api_status(record_id):
+    """Returns the current status of a running test thread."""
+    status = _running_tests.get(record_id, {"status": "not_started"})
+    return jsonify(status)
 
 
 @app.route("/api/report/<record_id>")
