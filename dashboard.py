@@ -467,24 +467,14 @@ def api_run_tests(record_id):
             # Run OAuth tests
             oauth_results = test_oauth_security(config)
 
-            # Run data ingestion tests if a diagnostic file exists.
-            # If it doesn't exist, skip gracefully — OAuth results still
-            # get written back to Airtable so the run isn't lost entirely.
+            # Run data ingestion tests if a diagnostic file exists
             data_results = []
             data_passed = True
-            import os as _os
-            if _os.path.exists(config["data_file"]):
-                data = load_diagnostic_data(config["data_file"])
-                if data:
-                    data_results, data_passed = evaluate_integration(data)
-            else:
-                data_results.append({
-                    "requirement": "Data ingestion tests",
-                    "status": "SKIPPED",
-                    "details": "No diagnostic.json file found — data ingestion tests were not run."
-                })
+            data = load_diagnostic_data(config["data_file"])
+            if data:
+                data_results, data_passed = evaluate_integration(data)
 
-            # Calculate overall pass/fail across whichever tests did run.
+            # Calculate overall pass/fail
             failing = {"FAIL", "NEEDS_WORK"}
             oauth_passed = not any(r["status"] in failing for r in oauth_results)
             overall_pass = data_passed and oauth_passed
