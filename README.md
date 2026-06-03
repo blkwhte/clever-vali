@@ -182,7 +182,7 @@ One or more expected sandbox users were not found in your `diagnostic.json`. The
 - **Active status:** Confirm the missing users are marked active in your system.
 - **Token scope:** Ensure your Clever API token has permission to read `sis_id` for all user types.
 
-You can read more about what edge cases are tested on this page of the (Clever Dev Docs)[https://dev.clever.com/docs/sync-testing#testing-with-certification-isd].
+You can read more about what edge cases are tested on this page of the Clever Dev Docs: https://dev.clever.com/docs/sync-testing#testing-with-certification-isd
 
 ---
 
@@ -217,7 +217,7 @@ These are evaluated by the Clever team as part of the standard certification rev
 
 ## Submitting Your Report
 
-Once Vali shows `overall_status: PASS`, include your `certification_report_*.json` file when you submit the [Clever Secure Sync Certification Form](https://airtable.com/appMaUPlogor33CWe/pagDqvB9KGNXFnQbO/form). This lets the Clever team verify your technical checks were completed and speeds up the review process.
+Once Vali shows `overall_status: PASS`, include your `certification_report_*.json` file when you submit the Clever Secure Sync Certification Form. This lets the Clever team verify your technical checks were completed and speeds up the review process.
 
 If you have questions about a failure you can't resolve, reach out to [integrations@clever.com](mailto:integrations@clever.com).
 
