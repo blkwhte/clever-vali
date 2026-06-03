@@ -7,7 +7,7 @@ from airtable_client import get_all_partners, get_partner_by_id, write_vali_resu
 # Import the existing Vali test logic from your current vali.py.
 # We're reusing the OAuth tests and data ingestion logic directly —
 # no need to rewrite them.
-from vali import test_oauth_security, evaluate_integration, load_diagnostic_data
+from vali_core import test_oauth_security, evaluate_integration, load_diagnostic_data
 
 app = Flask(__name__)
 
@@ -467,14 +467,24 @@ def api_run_tests(record_id):
             # Run OAuth tests
             oauth_results = test_oauth_security(config)
 
-            # Run data ingestion tests if a diagnostic file exists
+            # Run data ingestion tests if a diagnostic file exists.
+            # If it doesn't exist, skip gracefully — OAuth results still
+            # get written back to Airtable so the run isn't lost entirely.
             data_results = []
             data_passed = True
-            data = load_diagnostic_data(config["data_file"])
-            if data:
-                data_results, data_passed = evaluate_integration(data)
+            import os as _os
+            if _os.path.exists(config["data_file"]):
+                data = load_diagnostic_data(config["data_file"])
+                if data:
+                    data_results, data_passed = evaluate_integration(data)
+            else:
+                data_results.append({
+                    "requirement": "Data ingestion tests",
+                    "status": "SKIPPED",
+                    "details": "No diagnostic.json file found — data ingestion tests were not run."
+                })
 
-            # Calculate overall pass/fail
+            # Calculate overall pass/fail across whichever tests did run.
             failing = {"FAIL", "NEEDS_WORK"}
             oauth_passed = not any(r["status"] in failing for r in oauth_results)
             overall_pass = data_passed and oauth_passed
