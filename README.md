@@ -44,7 +44,7 @@ These tests analyze a JSON file that the partner exports from their application 
 **1. Clone the repo and install dependencies**
 
 ```bash
-git clone https://github.com/your-org/vali.git
+git clone https://github.com/blkwhte/clever-vali
 cd vali
 pip install requests
 ```
