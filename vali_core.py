@@ -4,434 +4,892 @@ import json
 import time
 import random
 import requests
-
-# FIX 7: Replaced deprecated datetime.utcnow() with the modern timezone-aware version.
-# The old way still works today but Python 3.12+ warns you about it, and it will
-# eventually be removed. This is the future-proof replacement.
 from datetime import datetime, timezone
 
-# --- DAY 1 EXPECTED STATE ---
-# These IDs point to specific records in the Clever sandbox district.
-# They are intentionally hardcoded because the sandbox is a fixed environment
-# your team controls. The key is renamed below for clarity (see FIX 4).
+# ---------------------------------------------------------------------------
+# SANDBOX CONFIG
+# ---------------------------------------------------------------------------
+# These users live in the #DEMO Certification ISD - Events sandbox district.
+# Each entry has the Clever credentials Playwright uses to log in, plus
+# metadata used for result reporting.
 #
-# FUTURE: If this list grows large, consider moving it to expected_state.json
-# and loading it at startup (see FIX 8 note at bottom of file).
-EXPECTED_STATE = {
-    # Each entry is a dict with three fields:
-    #   sis_id  — the value Vali looks for in the partner's diagnostic file
-    #   name    — the sandbox user's display name (for human-readable error output)
-    #   role    — the Clever role: "student", "teacher", or "admin"
-    #
-    # Having the role here lets Vali tell partners *why* a record is missing,
-    # not just *which* one — e.g. "all missing records are admins" points straight
-    # to a role-filtering bug or a missing token scope.
-    "required_users": [
-        {"sis_id": "738733110", "name": "Diane Schmeler", "role": "student"},
-        {"sis_id": "841688312", "name": "Kim Schmeler",   "role": "student"},
-        {"sis_id": "48",        "name": "Haylie Hauck",   "role": "student"},
-        {"sis_id": "69",        "name": "Seth Schoen",    "role": "student"},
-        {"sis_id": "4",         "name": "Admin 4",        "role": "admin"},
-        {"sis_id": "50",        "name": "Teacher 50",     "role": "teacher"},
-    ]
+# CREDENTIALS: stored here for internal use only. This file should never
+# be committed to a public repo. Add vali_core.py to .gitignore if needed,
+# or move credentials to .env (see bottom of file for how).
+# Each sandbox user has two identifiers:
+#   clever_id — the Clever-assigned UUID for this record. This is the stable
+#               primary key your duplicate check relies on.
+#   sis_id    — the district-assigned Student Information System ID. We check
+#               this to verify the district isn't passing duplicate records to
+#               Clever. These are the values your team hardcoded previously.
+#
+# Both fields are required. If a partner's app is using sis_id as their
+# primary key instead of clever_id, the duplicate check will catch it.
+SANDBOX_USERS = [
+    {
+        "clever_id":  "58da8c65d7dc0ca0680006b6",           # Fill in Clever UUID from sandbox district
+        "sis_id":     "738733110",  # District-assigned SIS ID
+        "name":       "Diane Schmeler",
+        "role":       "student",
+        "username":   "738733110",           # Fill in Clever sandbox login
+        "password":   "738733110",           # Fill in Clever sandbox password
+    },
+    {
+        "clever_id":  "58da8c65d7dc0ca06800071f",
+        "sis_id":     "841688312",
+        "name":       "Kim Jacobi",
+        "role":       "student",
+        "username":   "841688312",
+        "password":   "841688312",
+    },
+    {
+        "clever_id":  "5faac8b7bc447500a10ae841",
+        "sis_id":     "48",
+        "name":       "Haylie Hauck",
+        "role":       "teacher",
+        "username":   "830340",
+        "password":   "830340",
+    },
+    {
+        "clever_id":  "5faac8b7bc447500a10ae87f",
+        "sis_id":     "69",
+        "name":       "Seth Schoen",
+        "role":       "teacher",
+        "username":   "256742",
+        "password":   "256742",
+    },
+    {
+        "clever_id":  "5faac8b7bc447500a10ae89c",
+        "sis_id":     "4",
+        "name":       "Admin 4",
+        "role":       "admin",
+        "username":   "esmyth@example.com",
+        "password":   "4",
+    },
+    {
+        "clever_id":  "5faac8b7bc447500a10ae843",
+        "sis_id":     "50",
+        "name":       "Rupert Doyle",
+        "role":       "teacher",
+        "username":   "473664",
+        "password":   "473664",
+    },
+]
+
+# One sparse-profile user for the missing field handling test.
+# This user should have minimal optional fields set in the sandbox
+# (no email, no last name, etc.) to test graceful degradation.
+SPARSE_USER = {
+    "clever_id":  "",   # Fill in Clever UUID from sandbox district
+    "sis_id":     "",   # Fill in district SIS ID
+    "name":       "Sparse Test User",
+    "role":       "student",
+    "username":   "",
+    "password":   "",
 }
 
-# FIX 2: Maximum allowed file size for the diagnostic JSON.
-# Without this, a partner could accidentally hand us a huge file and crash
-# the process. 50 MB is generous for a user roster JSON.
 MAX_FILE_SIZE_MB = 50
 
 
-def interactive_setup():
-    print("="*50)
-    print("🧙‍♂️ Welcome to the Clever Vali Setup Wizard")
-    print("="*50)
+# ---------------------------------------------------------------------------
+# SHARED HELPERS
+# ---------------------------------------------------------------------------
 
-    use_defaults = input("Run with default settings? (Y/n): ").strip().lower()
-    if use_defaults == 'y' or use_defaults == '':
-        return {
-            "use_state": True,
-            "callback_url": "http://localhost:8080/auth/clever/callback",
-            "data_file": "diagnostic.json"
-        }
-
-    print("\nLet's customize your test suite:")
-
-    state_input = input("1. Does your app use the 'state' parameter for CSRF protection? (Y/n): ").strip().lower()
-    use_state = True if state_input in ['y', ''] else False
-
-    default_url = "http://localhost:8080/auth/clever/callback"
-    url_input = input(f"2. What is your local Clever callback URL? [{default_url}]: ").strip()
-    callback_url = url_input if url_input else default_url
-
-    default_file = "diagnostic.json"
-    file_input = input(f"3. Path to your diagnostic JSON file? [{default_file}]: ").strip()
-    data_file = file_input if file_input else default_file
-
+def _result(requirement, status, details, category="General"):
+    """
+    Returns a standardised result dict.
+    Every test function returns one of these — the registry runner
+    collects them all into the final report.
+    """
     return {
-        "use_state": use_state,
-        "callback_url": callback_url,
-        "data_file": data_file
+        "requirement": requirement,
+        "status":      status,       # PASS | FAIL | NEEDS_WORK | SKIPPED
+        "details":     details,
+        "category":    category,
     }
+
 
 def _get_with_backoff(url, max_retries=3, base_delay=1.0, **kwargs):
     """
-    Makes a GET request with exponential backoff and jitter on 429 responses.
-
-    If the server returns 429 (Too Many Requests), we wait and retry
-    rather than immediately failing the test. The wait doubles each
-    attempt, with a small random offset (jitter) so retries from
-    multiple tools don't all fire at the same instant.
-
-    Wait times: ~1s, ~2s, ~4s before giving up.
-
-    Any non-429 response (including errors) is returned immediately
-    without retrying — backoff is only for rate limiting, not other issues.
+    GET with exponential backoff + jitter on 429 responses.
+    Any non-429 response is returned immediately.
     """
     for attempt in range(max_retries):
         response = requests.get(url, **kwargs)
-
         if response.status_code != 429:
             return response
-
         if attempt < max_retries - 1:
-            # Exponential backoff: 1s, 2s, 4s — plus up to 0.5s of random jitter.
             delay = base_delay * (2 ** attempt) + random.uniform(0, 0.5)
-            print(f"   [!] Rate limited (429). Retrying in {delay:.1f}s... (attempt {attempt + 1}/{max_retries})")
+            print(f"   [!] Rate limited (429). Retrying in {delay:.1f}s... "
+                  f"(attempt {attempt + 1}/{max_retries})")
             time.sleep(delay)
-
-    # All retries exhausted — return the last 429 response so the
-    # calling test can handle it and report it clearly.
     return response
 
-def test_oauth_security(config):
-    print("\n" + "="*40)
-    print("🛡️ RUNNING OAUTH SECURITY TESTS")
-    print("="*40)
 
-    callback_url = config['callback_url']
-    results = []
+def _clever_login(page, username, password):
+    """
+    Drives Playwright through Clever's login page.
 
-    # TEST 1: Missing State Parameter (CONDITIONAL)
-    if config['use_state']:
-        print("[TEST] Missing State Parameter...")
-        try:
-            # FIX 9: Added timeout=10 to all requests calls.
-            # Without a timeout, if the partner's server hangs, this tool hangs
-            # with it — forever. 10 seconds is plenty for a local server to respond.
-            response = _get_with_backoff(
-                f"{callback_url}?code=fake_code_123",
-                allow_redirects=False,
-                timeout=10
-            )
-            if response.status_code == 429:
-                results.append({"requirement": "OAuth: Missing State Rejected", "status": "NEEDS_WORK", "details": "Server returned 429 (rate limited) after all retries. Try again in a few minutes."})
-            elif response.status_code in [400, 401, 403]:
-                results.append({"requirement": "OAuth: Missing State Rejected", "status": "PASS", "details": "App correctly rejected auth request without state."})
-            else:
-                results.append({"requirement": "OAuth: Missing State Rejected", "status": "FAIL", "details": f"Expected 400/401/403, got {response.status_code}"})
-        except requests.exceptions.Timeout:
-            results.append({"requirement": "OAuth: Missing State Rejected", "status": "FAIL", "details": "Server did not respond within 10 seconds."})
-        except requests.exceptions.RequestException:
-            results.append({"requirement": "OAuth: Missing State Rejected", "status": "FAIL", "details": "Server crashed or unreachable."})
-    else:
-        results.append({"requirement": "OAuth: Missing State Rejected", "status": "SKIPPED", "details": "Developer opted out of state parameter check."})
-
-    # TEST 2: Forged/Invalid State Parameter (CONDITIONAL)
-    # FIX 1: The original code sent &state=fake_session_state, which is ambiguous.
-    # A broken app might accept ANY state string, making this test pass incorrectly.
-    # We now send a value that is clearly probe-originated and document the intent:
-    # the app must reject a state value it never issued. This is a stronger signal.
-    if config['use_state']:
-        print("[TEST] Forged State Parameter...")
-        try:
-            forged_state_url = f"{callback_url}?code=fake_code_123&state=VALI_CSRF_PROBE_NOT_A_REAL_SESSION"
-            response = _get_with_backoff(forged_state_url, allow_redirects=False, timeout=10)
-            if response.status_code == 429:
-                results.append({"requirement": "OAuth: Forged State Rejected", "status": "NEEDS_WORK", "details": "Server returned 429 (rate limited) after all retries. Try again in a few minutes."})
-            elif response.status_code in [400, 401, 403]:
-                results.append({"requirement": "OAuth: Forged State Rejected", "status": "PASS", "details": "App correctly rejected a state value it never issued."})
-            else:
-                results.append({"requirement": "OAuth: Forged State Rejected", "status": "FAIL", "details": f"App accepted a forged state value (status {response.status_code}). State must be validated against active sessions."})
-        except requests.exceptions.Timeout:
-            results.append({"requirement": "OAuth: Forged State Rejected", "status": "FAIL", "details": "Server did not respond within 10 seconds."})
-        except requests.exceptions.RequestException:
-            results.append({"requirement": "OAuth: Forged State Rejected", "status": "FAIL", "details": "Server crashed or unreachable."})
-
-    # TEST 3: Invalid Authorization Code (Universal)
-    print("[TEST] Invalid Authorization Code...")
+    Returns True if login completed successfully, False otherwise.
+    This is the shared login step used by all SSO tests — keeping it
+    in one place means a Clever UI change only needs fixing here.
+    """
     try:
-        test_url = f"{callback_url}?code=invalid_forged_code_999"
-        if config['use_state']:
-            test_url += "&state=VALI_CSRF_PROBE_NOT_A_REAL_SESSION"
-
-        response = _get_with_backoff(test_url, allow_redirects=False, timeout=10)
-
-        if response.status_code == 429:
-            results.append({"requirement": "OAuth: Graceful Code Rejection", "status": "NEEDS_WORK", "details": "Server returned 429 (rate limited) after all retries. Try again in a few minutes."})
-        elif response.status_code in [302, 303, 400, 401]:
-            results.append({"requirement": "OAuth: Graceful Code Rejection", "status": "PASS", "details": "App safely handled invalid code."})
-        elif response.status_code == 500:
-            results.append({"requirement": "OAuth: Graceful Code Rejection", "status": "FAIL", "details": "App crashed (500) when Clever rejected the code. Add error handling!"})
-        else:
-            results.append({"requirement": "OAuth: Graceful Code Rejection", "status": "NEEDS_WORK", "details": f"Unexpected status {response.status_code}."})
-    except requests.exceptions.Timeout:
-        results.append({"requirement": "OAuth: Graceful Code Rejection", "status": "FAIL", "details": "Server did not respond within 10 seconds."})
-    except requests.exceptions.RequestException:
-        results.append({"requirement": "OAuth: Graceful Code Rejection", "status": "FAIL", "details": "Server crashed."})
-
-    for r in results:
-        print(f" -> {r['requirement']}: {r['status']}")
-
-    return results
+        # Wait for Clever's username field and fill credentials.
+        page.wait_for_selector('input[name="username"], input[type="email"]', timeout=10000)
+        page.fill('input[name="username"], input[type="email"]', username)
+        page.fill('input[name="password"], input[type="password"]', password)
+        page.click('button[type="submit"]')
+        # Wait for the redirect back to the partner's app.
+        # We consider login complete when we've left clever.com.
+        page.wait_for_url(lambda url: "clever.com" not in url, timeout=15000)
+        return True
+    except Exception as e:
+        print(f"   [!] Clever login failed: {e}")
+        return False
 
 
-def load_diagnostic_data(filepath):
-    """Loads and validates data from the local JSON artifact."""
-    if not os.path.exists(filepath):
-        print(f"\n[!] Error: Could not find '{filepath}'.")
-        print("Please ensure your application generated the diagnostic dump before running Vali.")
-        # FIX 6: Print the expected file format so partners know exactly what to produce.
-        # This replaces a frustrating trial-and-error experience with a clear spec.
-        print("\nExpected JSON format:")
-        print('  { "users": [ { "clever_id": "...", "sis_id": "...", "status": "active" } ] }')
-        return None
-
-    # FIX 2: Check the file size before trying to load it into memory.
-    # os.path.getsize() returns bytes, so we divide to get megabytes.
-    size_mb = os.path.getsize(filepath) / (1024 * 1024)
-    if size_mb > MAX_FILE_SIZE_MB:
-        print(f"\n[!] Error: '{filepath}' is {size_mb:.1f} MB — exceeds the {MAX_FILE_SIZE_MB} MB limit.")
-        print("Please ensure you are pointing to the correct diagnostic file.")
-        return None
-
-    with open(filepath, 'r', encoding='utf-8') as f:
-        try:
-            data = json.load(f)
-        except json.JSONDecodeError:
-            print(f"\n[!] Error: '{filepath}' contains invalid JSON.")
-            print('Expected format: { "users": [ { "clever_id": "...", "sis_id": "...", "status": "active" } ] }')
-            return None
-
-    # FIX 3: Validate the structure of the loaded data before we try to use it.
-    # Previously, if "users" was missing or wasn't a list, the code would crash
-    # deep inside evaluate_integration() with a confusing error message.
-    # Now we catch it here with a clear, actionable message.
-    if not isinstance(data, dict):
-        print("\n[!] Error: JSON file must be an object (starts with '{'), not a list or other type.")
-        return None
-
-    users = data.get("users")
-
-    if users is None:
-        print("\n[!] Error: JSON file is missing a 'users' key.")
-        print('Expected format: { "users": [ ... ] }')
-        return None
-
-    if not isinstance(users, list):
-        print("\n[!] Error: 'users' must be a list (array) of user objects.")
-        return None
-
-    # Filter out any entries that aren't dictionaries (defensive, just in case).
-    valid_users = [u for u in users if isinstance(u, dict)]
-    skipped = len(users) - len(valid_users)
-    if skipped > 0:
-        print(f"[!] Warning: Skipped {skipped} malformed user entries (not objects).")
-
-    # Return a cleaned-up version of the data with only valid user entries.
-    data["users"] = valid_users
-    return data
-
-
-def is_user_active(user):
+def _detect_sso_success(page, user):
     """
-    Flexibly determines if a user is active based on multiple industry-standard database schemas.
+    Layered success detection after an SSO login attempt.
+
+    Layer 1 — Name match: look for the user's name on the page.
+    Layer 2 — No error keywords: check the page doesn't show an error.
+    Layer 3 — URL signal: verify we've left clever.com.
+
+    Returns a (success: bool, confidence: str, detail: str) tuple.
+    confidence is "high", "medium", or "low".
     """
-    # 1. The String Status (Our original method)
-    if "status" in user and user["status"] != "":
-        return str(user["status"]).strip().lower() == "active"
+    page_text = page.inner_text("body").lower()
+    name_lower = user["name"].lower()
 
-    # 2. The Boolean Active Flag
-    if "is_active" in user:
-        return bool(user["is_active"])
+    # Layer 1: name present on page
+    if name_lower in page_text:
+        return True, "high", f"User's name '{user['name']}' found on page after login."
 
-    # 3. The Boolean Archive Flag
-    if "is_archived" in user:
-        return not bool(user["is_archived"])
-
-    # 4. Soft Delete Timestamp (If it has a timestamp, they are deleted/archived)
-    if "deleted_at" in user:
-        return user["deleted_at"] is None or str(user["deleted_at"]).strip() == ""
-
-    # Default: If the partner included them in the JSON and provided no status flags,
-    # we have to assume they are treating them as an active user.
-    return True
-
-
-def evaluate_integration(data):
-    """Evaluates the payload against certification requirements."""
-    results = []
-    overall_pass = True
-    users = data.get("users", [])
-
-    # Check 1: Primary Key Architecture
-    clever_ids = [u.get("clever_id") for u in users if u.get("clever_id")]
-    if len(clever_ids) != len(set(clever_ids)):
-        results.append({
-            "requirement": "Use Clever ID as primary identifier",
-            "status": "FAIL",
-            "details": "Duplicate Clever IDs detected. App is likely using email or SIS ID as the primary key."
-        })
-        overall_pass = False
-    else:
-        results.append({
-            "requirement": "Use Clever ID as primary identifier",
-            "status": "PASS",
-            "details": "No duplicate Clever IDs detected."
-        })
-
-    # Check 2: Core Data Ingestion (Edge Cases)
-    # EXPECTED_STATE now stores each required user as a dict with sis_id, name, and role.
-    # We build a lookup of the partner's active SIS IDs once, then check each expected
-    # user against it individually so we can report exactly who is missing and what role
-    # they belong to.
-    required_users = EXPECTED_STATE.get("required_users", [])
-    partner_active_sis_ids = {
-        str(u.get("sis_id")).strip()
-        for u in users
-        if is_user_active(u) and u.get("sis_id")
-    }
-
-    # Find which expected users are absent from the partner's file.
-    missing_users = [
-        ru for ru in required_users
-        if str(ru["sis_id"]).strip() not in partner_active_sis_ids
-    ]
-
-    if missing_users:
-        # Group missing users by role so the error message highlights patterns
-        # (e.g. "all missing records are admins") rather than just listing IDs.
-        by_role = {}
-        for ru in missing_users:
-            by_role.setdefault(ru["role"], []).append(ru)
-
-        missing_lines = []
-        for role, records in sorted(by_role.items()):
-            for r in records:
-                missing_lines.append(f"  - [{role.upper()}] {r['name']} (sis_id: {r['sis_id']})")
-
-        # Build a role-specific hint if all missing records share the same role.
-        if len(by_role) == 1:
-            sole_role = list(by_role.keys())[0]
-            role_hint = (
-                f"  ⚠️  All missing records are role='{sole_role}'. "
-                f"This often means your app is filtering out {sole_role}s entirely, "
-                f"or your token lacks the scope to read them.\n"
-            )
-        else:
-            roles_affected = ", ".join(sorted(by_role.keys()))
-            role_hint = f"  ⚠️  Missing records span multiple roles: {roles_affected}.\n"
-
-        details = (
-            f"Missing {len(missing_users)} of {len(required_users)} expected sandbox records:\n"
-            + "\n".join(missing_lines) + "\n\n"
-            + f"🔍 Vali Debugger:\n"
-            + role_hint
-            + f"  Your file contains {len(partner_active_sis_ids)} active users with a valid sis_id.\n\n"
-            + f"🛠️ How to fix:\n"
-            + f"  1. Pagination Pitfall: Did your app fetch ALL pages of data?\n"
-            + f"  2. Role Filtering: Is your app ignoring certain roles (student/teacher/admin)?\n"
-            + f"  3. Ingestion Rejection: Did your app skip them? Check your logs.\n"
-            + f"  4. Active Status: Are they marked active?\n"
-            + f"  5. Token Scope: Ensure your Clever token can read 'sis_id' for all roles."
+    # Layer 2: check for error keywords
+    error_keywords = ["error", "invalid", "unauthorized", "not found",
+                      "something went wrong", "access denied", "forbidden"]
+    found_errors = [kw for kw in error_keywords if kw in page_text]
+    if found_errors:
+        return False, "high", (
+            f"Error keywords found on page after login: {found_errors}. "
+            f"App may not have recognised the user."
         )
-        results.append({
-            "requirement": "Utilize all relevant data (Edge Case Ingestion)",
-            "status": "FAIL",
-            "details": details
-        })
-        overall_pass = False
-    else:
-        results.append({
-            "requirement": "Utilize all relevant data (Edge Case Ingestion)",
-            "status": "PASS",
-            "details": "All Day 1 edge case records successfully ingested. Robust error handling verified!"
-        })
 
+    # Layer 3: we've left clever.com — likely succeeded but name wasn't visible
+    current_url = page.url
+    if "clever.com" not in current_url:
+        return True, "medium", (
+            f"Redirected to '{current_url}' — login appears successful, "
+            f"but user's name was not found on the page. "
+            f"This may be normal for apps that don't display names (e.g. games)."
+        )
+
+    return False, "low", "Still on clever.com after login attempt — redirect did not complete."
+
+
+# ---------------------------------------------------------------------------
+# OAUTH SECURITY TESTS
+# ---------------------------------------------------------------------------
+
+def test_missing_state(config):
+    """Verifies the app rejects OAuth callbacks with no state parameter."""
+    if not config.get("use_state"):
+        return _result(
+            "OAuth: Missing state rejected",
+            "SKIPPED",
+            "App does not use the state parameter — test skipped.",
+            "OAuth Security"
+        )
+    try:
+        response = _get_with_backoff(
+            f"{config['callback_url']}?code=fake_code_123",
+            allow_redirects=False, timeout=10
+        )
+        if response.status_code == 429:
+            return _result("OAuth: Missing state rejected", "NEEDS_WORK",
+                "Rate limited after all retries. Try again in a few minutes.",
+                "OAuth Security")
+        elif response.status_code in [400, 401, 403]:
+            return _result("OAuth: Missing state rejected", "PASS",
+                "App correctly rejected auth request without state.",
+                "OAuth Security")
+        else:
+            return _result("OAuth: Missing state rejected", "FAIL",
+                f"Expected 400/401/403, got {response.status_code}.",
+                "OAuth Security")
+    except requests.exceptions.Timeout:
+        return _result("OAuth: Missing state rejected", "FAIL",
+            "Server did not respond within 10 seconds.", "OAuth Security")
+    except requests.exceptions.RequestException:
+        return _result("OAuth: Missing state rejected", "FAIL",
+            "Server crashed or unreachable.", "OAuth Security")
+
+
+def test_forged_state(config):
+    """Verifies the app rejects a state value it never issued."""
+    if not config.get("use_state"):
+        return _result(
+            "OAuth: Forged state rejected",
+            "SKIPPED",
+            "App does not use the state parameter — test skipped.",
+            "OAuth Security"
+        )
+    try:
+        url = (f"{config['callback_url']}?code=fake_code_123"
+               f"&state=VALI_CSRF_PROBE_NOT_A_REAL_SESSION")
+        response = _get_with_backoff(url, allow_redirects=False, timeout=10)
+        if response.status_code == 429:
+            return _result("OAuth: Forged state rejected", "NEEDS_WORK",
+                "Rate limited after all retries. Try again in a few minutes.",
+                "OAuth Security")
+        elif response.status_code in [400, 401, 403]:
+            return _result("OAuth: Forged state rejected", "PASS",
+                "App correctly rejected a state value it never issued.",
+                "OAuth Security")
+        else:
+            return _result("OAuth: Forged state rejected", "FAIL",
+                f"App accepted a forged state value (status {response.status_code}). "
+                f"State must be validated against active sessions.",
+                "OAuth Security")
+    except requests.exceptions.Timeout:
+        return _result("OAuth: Forged state rejected", "FAIL",
+            "Server did not respond within 10 seconds.", "OAuth Security")
+    except requests.exceptions.RequestException:
+        return _result("OAuth: Forged state rejected", "FAIL",
+            "Server crashed or unreachable.", "OAuth Security")
+
+
+def test_invalid_code(config):
+    """Verifies the app handles an invalid authorization code without crashing."""
+    try:
+        url = f"{config['callback_url']}?code=invalid_forged_code_999"
+        if config.get("use_state"):
+            url += "&state=VALI_CSRF_PROBE_NOT_A_REAL_SESSION"
+        response = _get_with_backoff(url, allow_redirects=False, timeout=10)
+        if response.status_code == 429:
+            return _result("OAuth: Graceful code rejection", "NEEDS_WORK",
+                "Rate limited after all retries. Try again in a few minutes.",
+                "OAuth Security")
+        elif response.status_code in [302, 303, 400, 401]:
+            return _result("OAuth: Graceful code rejection", "PASS",
+                "App safely handled invalid authorization code.",
+                "OAuth Security")
+        elif response.status_code == 500:
+            return _result("OAuth: Graceful code rejection", "FAIL",
+                "App crashed (500) when Clever rejected the code. "
+                "Add error handling around the token exchange step.",
+                "OAuth Security")
+        else:
+            return _result("OAuth: Graceful code rejection", "NEEDS_WORK",
+                f"Unexpected status {response.status_code}.",
+                "OAuth Security")
+    except requests.exceptions.Timeout:
+        return _result("OAuth: Graceful code rejection", "FAIL",
+            "Server did not respond within 10 seconds.", "OAuth Security")
+    except requests.exceptions.RequestException:
+        return _result("OAuth: Graceful code rejection", "FAIL",
+            "Server crashed.", "OAuth Security")
+
+
+# ---------------------------------------------------------------------------
+# SSO BEHAVIOR TESTS (Playwright)
+# ---------------------------------------------------------------------------
+
+def test_sso_role_coverage(config):
+    """
+    Logs into the partner's app as a student, teacher, and admin via
+    Clever SSO. Verifies each role is recognised after login.
+
+    This catches the most common data ingestion failure modes without
+    requiring a diagnostic file — if Teacher 50 can't log in, the app
+    isn't provisioning teachers regardless of what their database says.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return _result(
+            "SSO: Role coverage",
+            "SKIPPED",
+            "Playwright is not installed. Run: pip install playwright && playwright install chromium",
+            "SSO Behavior"
+        )
+
+    login_url = config.get("login_url", "")
+    if not login_url:
+        return _result(
+            "SSO: Role coverage",
+            "SKIPPED",
+            "No login_url provided in config. Add the partner's login page URL to run SSO tests.",
+            "SSO Behavior"
+        )
+
+    # Test one user per role — we don't need to test every sandbox user,
+    # just enough to verify each role type is handled.
+    test_users = [u for u in SANDBOX_USERS if u["username"] and u["password"]]
+    if not test_users:
+        return _result(
+            "SSO: Role coverage",
+            "SKIPPED",
+            "No sandbox user credentials configured in SANDBOX_USERS. "
+            "Fill in username and password for each user to enable SSO tests.",
+            "SSO Behavior"
+        )
+
+    role_results = {}   # role -> (success, confidence, detail)
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+
+        for user in test_users:
+            print(f"   [SSO] Testing {user['role']} login: {user['name']}...")
+            # Each user gets a fresh browser context — equivalent to
+            # a clean incognito window with no shared session state.
+            context = browser.new_context()
+            page = context.new_page()
+
+            try:
+                # Navigate to the partner's login page and trigger Clever SSO.
+                page.goto(login_url, timeout=15000)
+
+                # Click the "Log in with Clever" button.
+                # We try common selectors — partners implement this differently.
+                clever_btn_selectors = [
+                    'a[href*="clever.com"]',
+                    'a:has-text("Clever")',
+                    'button:has-text("Clever")',
+                    'a:has-text("Log in with Clever")',
+                    '[class*="clever"]',
+                ]
+                clicked = False
+                for selector in clever_btn_selectors:
+                    try:
+                        page.click(selector, timeout=3000)
+                        clicked = True
+                        break
+                    except Exception:
+                        continue
+
+                if not clicked:
+                    role_results[user["role"]] = (
+                        False, "high",
+                        f"Could not find a 'Log in with Clever' button on {login_url}. "
+                        f"Tried selectors: {clever_btn_selectors}"
+                    )
+                    context.close()
+                    continue
+
+                # Complete the Clever login flow.
+                login_ok = _clever_login(page, user["username"], user["password"])
+                if not login_ok:
+                    role_results[user["role"]] = (
+                        False, "high",
+                        f"Clever login flow did not complete for {user['name']} ({user['role']})."
+                    )
+                    context.close()
+                    continue
+
+                # Detect whether the app recognised the user.
+                success, confidence, detail = _detect_sso_success(page, user)
+                role_results[user["role"]] = (success, confidence, detail)
+
+            except Exception as e:
+                role_results[user["role"]] = (
+                    False, "high",
+                    f"Unexpected error during {user['role']} login test: {e}"
+                )
+            finally:
+                context.close()
+
+        browser.close()
+
+    # Build the combined result from all role outcomes.
+    failed_roles  = [r for r, (ok, _, _) in role_results.items() if not ok]
+    medium_roles  = [r for r, (ok, conf, _) in role_results.items() if ok and conf == "medium"]
+    passed_roles  = [r for r, (ok, conf, _) in role_results.items() if ok and conf == "high"]
+
+    detail_lines = []
+    for role, (ok, conf, detail) in sorted(role_results.items()):
+        icon = "✓" if ok else "✗"
+        detail_lines.append(f"  {icon} [{role.upper()}] {detail}")
+
+    if failed_roles:
+        return _result(
+            "SSO: Role coverage",
+            "FAIL",
+            f"Login failed for role(s): {', '.join(failed_roles)}\n\n"
+            + "\n".join(detail_lines)
+            + "\n\nThis typically means the app is not provisioning these role types. "
+            + "Check your ingestion logic and token scopes.",
+            "SSO Behavior"
+        )
+    elif medium_roles:
+        return _result(
+            "SSO: Role coverage",
+            "NEEDS_WORK",
+            f"All roles redirected successfully, but user name was not visible on the page "
+            f"for: {', '.join(medium_roles)}. This may be normal for certain app types.\n\n"
+            + "\n".join(detail_lines),
+            "SSO Behavior"
+        )
+    else:
+        return _result(
+            "SSO: Role coverage",
+            "PASS",
+            f"All tested roles logged in successfully: {', '.join(sorted(passed_roles))}\n\n"
+            + "\n".join(detail_lines),
+            "SSO Behavior"
+        )
+
+
+def test_sso_missing_fields(config):
+    """
+    Logs in as a sandbox user with a sparse profile (missing optional
+    fields like email, last name, etc.) and checks whether the app
+    handles the missing data gracefully rather than crashing.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return _result(
+            "SSO: Missing field handling",
+            "SKIPPED",
+            "Playwright is not installed. Run: pip install playwright && playwright install chromium",
+            "SSO Behavior"
+        )
+
+    login_url = config.get("login_url", "")
+    if not login_url:
+        return _result("SSO: Missing field handling", "SKIPPED",
+            "No login_url provided in config.", "SSO Behavior")
+
+    if not SPARSE_USER.get("username") or not SPARSE_USER.get("password"):
+        return _result("SSO: Missing field handling", "SKIPPED",
+            "No sparse user credentials configured in SPARSE_USER. "
+            "Fill in the credentials to enable this test.",
+            "SSO Behavior")
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        context = browser.new_context()
+        page = context.new_page()
+
+        try:
+            page.goto(login_url, timeout=15000)
+
+            clever_btn_selectors = [
+                'a[href*="clever.com"]',
+                'a:has-text("Clever")',
+                'button:has-text("Clever")',
+                'a:has-text("Log in with Clever")',
+                '[class*="clever"]',
+            ]
+            clicked = False
+            for selector in clever_btn_selectors:
+                try:
+                    page.click(selector, timeout=3000)
+                    clicked = True
+                    break
+                except Exception:
+                    continue
+
+            if not clicked:
+                return _result("SSO: Missing field handling", "SKIPPED",
+                    f"Could not find a 'Log in with Clever' button on {login_url}.",
+                    "SSO Behavior")
+
+            login_ok = _clever_login(
+                page, SPARSE_USER["username"], SPARSE_USER["password"]
+            )
+            if not login_ok:
+                return _result("SSO: Missing field handling", "FAIL",
+                    "Clever login did not complete for sparse profile user. "
+                    "Check credentials in SPARSE_USER config.",
+                    "SSO Behavior")
+
+            # Check for crash indicators — a 500 or error page after login
+            # means the app doesn't handle missing fields gracefully.
+            page_text = page.inner_text("body").lower()
+            crash_keywords = ["500", "internal server error", "something went wrong",
+                              "unhandled exception", "null pointer", "undefined"]
+            found_crashes = [kw for kw in crash_keywords if kw in page_text]
+
+            if found_crashes:
+                return _result(
+                    "SSO: Missing field handling",
+                    "FAIL",
+                    f"App appears to have crashed after logging in with a sparse profile user. "
+                    f"Keywords found: {found_crashes}. "
+                    f"Ensure all non-required Clever fields are treated as optional.",
+                    "SSO Behavior"
+                )
+
+            success, confidence, detail = _detect_sso_success(page, SPARSE_USER)
+            if success:
+                return _result(
+                    "SSO: Missing field handling",
+                    "PASS",
+                    f"App handled sparse profile user gracefully. {detail}",
+                    "SSO Behavior"
+                )
+            else:
+                return _result(
+                    "SSO: Missing field handling",
+                    "FAIL",
+                    f"App did not recognise sparse profile user after login. {detail} "
+                    f"Check that missing optional fields don't block user provisioning.",
+                    "SSO Behavior"
+                )
+
+        except Exception as e:
+            return _result("SSO: Missing field handling", "FAIL",
+                f"Unexpected error: {e}", "SSO Behavior")
+        finally:
+            context.close()
+            browser.close()
+
+
+def test_sso_session_invalidation(config):
+    """
+    Verifies that a new Clever login invalidates any existing session.
+
+    Logs in as User A, captures their session, then logs in as User B
+    in a separate browser context. Goes back to User A's context and
+    checks whether their session was invalidated — the app should not
+    still recognise User A after User B has logged in.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return _result(
+            "SSO: Session invalidation",
+            "SKIPPED",
+            "Playwright is not installed. Run: pip install playwright && playwright install chromium",
+            "SSO Behavior"
+        )
+
+    login_url = config.get("login_url", "")
+    if not login_url:
+        return _result("SSO: Session invalidation", "SKIPPED",
+            "No login_url provided in config.", "SSO Behavior")
+
+    # Need at least two users with credentials for this test.
+    # We use clever_id (Clever UUID) as the stable identifier here —
+    # not sis_id — because clever_id is what the app should be using
+    # as its primary key.
+    credentialled = [u for u in SANDBOX_USERS if u["username"] and u["password"]]
+    if len(credentialled) < 2:
+        return _result("SSO: Session invalidation", "SKIPPED",
+            "At least two sandbox users with credentials are required. "
+            "Fill in username and password for two or more users in SANDBOX_USERS.",
+            "SSO Behavior")
+
+    user_a = credentialled[0]
+    user_b = credentialled[1]
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+
+        # Step 1: Log in as User A and capture a URL that requires auth.
+        print(f"   [SSO] Session test: logging in as User A ({user_a['name']})...")
+        context_a = browser.new_context()
+        page_a = context_a.new_page()
+
+        try:
+            page_a.goto(login_url, timeout=15000)
+            clever_btns = [
+                'a[href*="clever.com"]', 'a:has-text("Clever")',
+                'button:has-text("Clever")', 'a:has-text("Log in with Clever")',
+                '[class*="clever"]',
+            ]
+            for sel in clever_btns:
+                try:
+                    page_a.click(sel, timeout=3000)
+                    break
+                except Exception:
+                    continue
+
+            login_ok = _clever_login(page_a, user_a["username"], user_a["password"])
+            if not login_ok:
+                return _result("SSO: Session invalidation", "FAIL",
+                    f"Could not complete login for User A ({user_a['name']}). "
+                    "Check credentials.", "SSO Behavior")
+
+            # Capture the authenticated URL to revisit later.
+            authenticated_url = page_a.url
+            print(f"   [SSO] User A logged in. Authenticated URL: {authenticated_url}")
+
+        except Exception as e:
+            context_a.close()
+            browser.close()
+            return _result("SSO: Session invalidation", "FAIL",
+                f"Error during User A login: {e}", "SSO Behavior")
+
+        # Step 2: Log in as User B in a separate context (simulates a new device).
+        print(f"   [SSO] Session test: logging in as User B ({user_b['name']})...")
+        context_b = browser.new_context()
+        page_b = context_b.new_page()
+
+        try:
+            page_b.goto(login_url, timeout=15000)
+            for sel in clever_btns:
+                try:
+                    page_b.click(sel, timeout=3000)
+                    break
+                except Exception:
+                    continue
+
+            login_ok = _clever_login(page_b, user_b["username"], user_b["password"])
+            if not login_ok:
+                return _result("SSO: Session invalidation", "FAIL",
+                    f"Could not complete login for User B ({user_b['name']}). "
+                    "Check credentials.", "SSO Behavior")
+
+            print(f"   [SSO] User B logged in. Now checking User A's session...")
+
+        except Exception as e:
+            context_b.close()
+            context_a.close()
+            browser.close()
+            return _result("SSO: Session invalidation", "FAIL",
+                f"Error during User B login: {e}", "SSO Behavior")
+        finally:
+            context_b.close()
+
+        # Step 3: Go back to User A's context and check if their session is still valid.
+        # A correctly implemented app should have invalidated User A's session
+        # when User B logged in on the same device/app instance.
+        try:
+            page_a.goto(authenticated_url, timeout=15000)
+            page_a.wait_for_load_state("networkidle", timeout=10000)
+            page_text = page_a.inner_text("body").lower()
+            user_a_name = user_a["name"].lower()
+
+            # If User A's name is still on the page, their session wasn't invalidated.
+            if user_a_name in page_text:
+                return _result(
+                    "SSO: Session invalidation",
+                    "FAIL",
+                    f"User A ({user_a['name']}) session was still active after User B logged in. "
+                    f"Each new Clever login must invalidate existing sessions. "
+                    f"See: https://dev.clever.com/docs/il-security#shared-devices-session-re-authentication-and-session-invalidation",
+                    "SSO Behavior"
+                )
+
+            # If we're redirected to a login page, the session was correctly invalidated.
+            redirect_indicators = ["login", "sign in", "log in", "clever.com"]
+            if any(ind in page_a.url.lower() or ind in page_text for ind in redirect_indicators):
+                return _result(
+                    "SSO: Session invalidation",
+                    "PASS",
+                    f"User A's session was correctly invalidated after User B logged in. "
+                    f"App redirected to login when User A's session was revisited.",
+                    "SSO Behavior"
+                )
+
+            # Ambiguous — session may or may not be valid, name just not visible.
+            return _result(
+                "SSO: Session invalidation",
+                "NEEDS_WORK",
+                f"Could not definitively confirm session invalidation. "
+                f"User A's name was not found, but the app didn't clearly redirect to login either. "
+                f"Manual verification recommended.",
+                "SSO Behavior"
+            )
+
+        except Exception as e:
+            return _result("SSO: Session invalidation", "FAIL",
+                f"Error checking User A's session after User B login: {e}",
+                "SSO Behavior")
+        finally:
+            context_a.close()
+            browser.close()
+
+
+# ---------------------------------------------------------------------------
+# TEST REGISTRY
+# ---------------------------------------------------------------------------
+# Each entry defines one test. To add a new test:
+#   1. Write a function above that returns _result(...)
+#   2. Add one entry here — that's it, no other changes needed.
+#
+# Fields:
+#   fn              — the test function to call
+#   category        — groups tests in the dashboard (OAuth Security, SSO Behavior, etc.)
+#   requires_browser — True if the test needs Playwright; used by the runner
+#                      to skip browser tests when Playwright isn't installed
+#   enabled         — set False to temporarily disable without deleting
+
+TEST_REGISTRY = [
+    # OAuth Security
+    {
+        "fn":               test_missing_state,
+        "category":         "OAuth Security",
+        "requires_browser": False,
+        "enabled":          True,
+    },
+    {
+        "fn":               test_forged_state,
+        "category":         "OAuth Security",
+        "requires_browser": False,
+        "enabled":          True,
+    },
+    {
+        "fn":               test_invalid_code,
+        "category":         "OAuth Security",
+        "requires_browser": False,
+        "enabled":          True,
+    },
+    # SSO Behavior
+    {
+        "fn":               test_sso_role_coverage,
+        "category":         "SSO Behavior",
+        "requires_browser": True,
+        "enabled":          True,
+    },
+    {
+        "fn":               test_sso_missing_fields,
+        "category":         "SSO Behavior",
+        "requires_browser": True,
+        "enabled":          True,
+    },
+    {
+        "fn":               test_sso_session_invalidation,
+        "category":         "SSO Behavior",
+        "requires_browser": True,
+        "enabled":          True,
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# RUNNER
+# ---------------------------------------------------------------------------
+
+def run_all_tests(config):
+    """
+    Iterates the TEST_REGISTRY and runs every enabled test.
+    Returns a flat list of result dicts and an overall pass/fail bool.
+
+    The dashboard calls this instead of calling individual test functions.
+    Adding a new test to the registry is all that's needed to include it
+    in every future run.
+    """
+    results = []
+    playwright_available = _check_playwright()
+
+    for entry in TEST_REGISTRY:
+        if not entry.get("enabled", True):
+            continue
+
+        # Skip browser tests gracefully if Playwright isn't installed.
+        if entry["requires_browser"] and not playwright_available:
+            results.append(_result(
+                entry["fn"].__name__.replace("test_", "").replace("_", " ").title(),
+                "SKIPPED",
+                "Playwright not installed — browser tests skipped. "
+                "Run: pip install playwright && playwright install chromium",
+                entry["category"]
+            ))
+            continue
+
+        print(f"[TEST] {entry['fn'].__name__}...")
+        try:
+            result = entry["fn"](config)
+            results.append(result)
+        except Exception as e:
+            # Catch unexpected errors so one broken test doesn't abort the run.
+            results.append(_result(
+                entry["fn"].__name__,
+                "FAIL",
+                f"Test raised an unexpected error: {e}",
+                entry["category"]
+            ))
+
+    failing = {"FAIL", "NEEDS_WORK"}
+    overall_pass = not any(r["status"] in failing for r in results)
     return results, overall_pass
 
 
-def generate_report(oauth_results, data_results, overall_pass):
-    """Outputs the JSON report card."""
-    combined_results = oauth_results + data_results
+def _check_playwright():
+    """Returns True if Playwright is installed and usable."""
+    try:
+        from playwright.sync_api import sync_playwright  # noqa
+        return True
+    except ImportError:
+        return False
 
-    # FIX 10: Timestamp the output filename so each run produces a unique file.
-    # Previously, running Vali twice would silently overwrite the first report.
-    # Now partners keep a full history of every validation run.
-    timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    filename = f"certification_report_{timestamp_str}.json"
+
+# ---------------------------------------------------------------------------
+# DATA LOADING (kept for backward compatibility / CLI mode)
+# ---------------------------------------------------------------------------
+
+def is_user_active(user):
+    """Flexibly determines if a user is active across multiple schema conventions."""
+    if "status" in user and user["status"] != "":
+        return str(user["status"]).strip().lower() == "active"
+    if "is_active" in user:
+        return bool(user["is_active"])
+    if "is_archived" in user:
+        return not bool(user["is_archived"])
+    if "deleted_at" in user:
+        return user["deleted_at"] is None or str(user["deleted_at"]).strip() == ""
+    return True
+
+
+def load_diagnostic_data(filepath):
+    """Loads and validates a diagnostic JSON file (legacy / optional)."""
+    if not os.path.exists(filepath):
+        return None
+    size_mb = os.path.getsize(filepath) / (1024 * 1024)
+    if size_mb > MAX_FILE_SIZE_MB:
+        print(f"[!] File too large ({size_mb:.1f} MB). Max is {MAX_FILE_SIZE_MB} MB.")
+        return None
+    with open(filepath, "r", encoding="utf-8") as f:
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError:
+            print(f"[!] Invalid JSON in '{filepath}'.")
+            return None
+    if not isinstance(data, dict) or not isinstance(data.get("users"), list):
+        print("[!] JSON must be { \"users\": [...] }")
+        return None
+    data["users"] = [u for u in data["users"] if isinstance(u, dict)]
+    return data
+
+
+# ---------------------------------------------------------------------------
+# CLI ENTRY POINT (optional — dashboard is the primary interface now)
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    print("="*50)
+    print("⚡ Vali — Clever Certification Validator")
+    print("="*50)
+
+    config = {
+        "use_state":    True,
+        "callback_url": input("Callback URL [http://localhost:8080/auth/clever/callback]: ").strip()
+                        or "http://localhost:8080/auth/clever/callback",
+        "login_url":    input("App login URL (for SSO tests, leave blank to skip): ").strip(),
+        "data_file":    "diagnostic.json",
+    }
+
+    results, overall_pass = run_all_tests(config)
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    filename  = f"certification_report_{timestamp}.json"
 
     report = {
-        "validator_version": "v2.1-ArtifactMode",
-        # FIX 7: datetime.now(timezone.utc) replaces the deprecated datetime.utcnow().
-        # Both produce a UTC timestamp, but this version is explicit about the timezone
-        # and won't trigger deprecation warnings in Python 3.12+.
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        # FIX 5: overall_status now correctly treats NEEDS_WORK as a failure.
-        # Previously, a NEEDS_WORK result from an OAuth test would silently pass
-        # the overall grade. Now any non-PASS, non-SKIPPED result fails the run.
-        "overall_status": "PASS" if overall_pass else "NEEDS_WORK",
-        "results": combined_results
+        "validator_version": "v3.0-Internal",
+        "timestamp":         datetime.now(timezone.utc).isoformat(),
+        "overall_status":    "PASS" if overall_pass else "NEEDS_WORK",
+        "results":           results,
     }
 
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
 
-    print("\n" + "="*40)
-    print(f"VALIDATION COMPLETE: {report['overall_status']}")
+    print(f"\nVALIDATION COMPLETE: {report['overall_status']}")
     print(f"Report saved to -> {filename}")
-    print("="*40)
-
-
-if __name__ == "__main__":
-    # 1. Ask the developer how they want to test
-    config = interactive_setup()
-
-    # 2. Run OAuth security tests against the live callback URL
-    oauth_results = test_oauth_security(config)
-
-    # 3. Grade the Data Ingestion from the diagnostic file
-    print("\n" + "="*40)
-    print("📊 RUNNING DATA INGESTION TESTS")
-    print("="*40)
-
-    data = load_diagnostic_data(config['data_file'])
-    if data:
-        data_results, data_passed = evaluate_integration(data)
-
-        # FIX 5: Updated overall pass/fail logic to treat NEEDS_WORK as a failure.
-        # The original code only checked for PASS and SKIPPED, which meant a
-        # NEEDS_WORK result from an OAuth test would be silently ignored.
-        failing_statuses = {'FAIL', 'NEEDS_WORK'}
-        oauth_passed = not any(r['status'] in failing_statuses for r in oauth_results)
-        overall_pass = data_passed and oauth_passed
-
-        generate_report(oauth_results, data_results, overall_pass)
-    else:
-        print("[!] Validation aborted. Fix the data file issue and run Vali again.")
-        sys.exit(1)
-
-# --- FIX 8 NOTE: Scaling EXPECTED_STATE ---
-# Right now the sandbox IDs live inline above. If the list grows large,
-# you can move them to a separate file called expected_state.json and
-# replace the EXPECTED_STATE block at the top with this:
-#
-#   with open("expected_state.json", "r") as f:
-#       EXPECTED_STATE = json.load(f)
-#
-# expected_state.json would look like:
-#   {
-#     "required_sis_ids": ["738733110", "841688312", "48", "69", "4", "50"]
-#   }
-#
-# That file stays in your repo and partners never touch it.

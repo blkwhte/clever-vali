@@ -7,7 +7,7 @@ from airtable_client import get_all_partners, get_partner_by_id, write_vali_resu
 # Import the existing Vali test logic from your current vali.py.
 # We're reusing the OAuth tests and data ingestion logic directly —
 # no need to rewrite them.
-from vali_core import test_oauth_security, evaluate_integration, load_diagnostic_data
+from vali_core import run_all_tests
 
 app = Flask(__name__)
 
@@ -241,8 +241,7 @@ async function selectPartner(id) {
 function renderMain(partner) {
   const report = partner.vali_report || {};
   const results = report.results || [];
-  const oauthResults = results.filter(r => r.requirement && r.requirement.startsWith('OAuth'));
-  const dataResults  = results.filter(r => r.requirement && !r.requirement.startsWith('OAuth'));
+  // Group results by category for rendering
   const pass  = results.filter(r => r.status === 'PASS').length;
   const fail  = results.filter(r => r.status === 'FAIL' || r.status === 'NEEDS_WORK').length;
   const skip  = results.filter(r => r.status === 'SKIPPED').length;
@@ -277,10 +276,7 @@ function renderMain(partner) {
             <div class="metric"><div class="metric-label">Failed</div><div class="metric-val red">${fail}</div></div>
             <div class="metric"><div class="metric-label">Skipped</div><div class="metric-val">${skip}</div></div>
           </div>
-          <div class="section-label">OAuth security</div>
-          ${oauthResults.map(r => resultCard(r)).join('') || '<div style="font-size:13px;color:var(--text3)">No OAuth results.</div>'}
-          <div class="section-label">Data ingestion</div>
-          ${dataResults.map(r => resultCard(r)).join('') || '<div style="font-size:13px;color:var(--text3)">No data ingestion results.</div>'}
+          ${renderResultsByCategory(results)}
           `
         }
       </div>
@@ -290,6 +286,22 @@ function renderMain(partner) {
       </div>
     </div>
   `;
+}
+
+function renderResultsByCategory(results) {
+  if (!results.length) return '<div style="font-size:13px;color:var(--color-text-tertiary,#888)">No results yet.</div>';
+  // Group by category, preserving order of first appearance
+  const categories = [];
+  const byCategory = {};
+  results.forEach(r => {
+    const cat = r.category || 'General';
+    if (!byCategory[cat]) { byCategory[cat] = []; categories.push(cat); }
+    byCategory[cat].push(r);
+  });
+  return categories.map(cat =>
+    `<div class="section-label">${cat}</div>` +
+    byCategory[cat].map(r => resultCard(r)).join('')
+  ).join('');
 }
 
 function resultCard(r) {
@@ -504,39 +516,19 @@ def api_run_tests(record_id):
 
     def run():
         try:
+            # Build config from partner's Airtable profile.
+            # login_url comes from the partner's Airtable record (their app's login page).
+            # callback_url is used for the raw OAuth probe tests.
             config = {
-                "use_state": True,
-                "callback_url": partner.get("callback_url") or "http://localhost:8080/auth/clever/callback",
-                "data_file": "diagnostic.json",
+                "use_state":    True,
+                "callback_url": partner.get("callback_url") or "",
+                "login_url":    partner.get("login_url") or "",
+                "data_file":    "diagnostic.json",
             }
 
-            # Run OAuth tests
-            oauth_results = test_oauth_security(config)
-
-            # Run data ingestion tests if a diagnostic file exists.
-            # If it doesn't exist, skip gracefully — OAuth results still
-            # get written back to Airtable so the run isn't lost entirely.
-            data_results = []
-            data_passed = True
-            import os as _os
-            if _os.path.exists(config["data_file"]):
-                data = load_diagnostic_data(config["data_file"])
-                if data:
-                    data_results, data_passed = evaluate_integration(data)
-            else:
-                data_results.append({
-                    "requirement": "Data ingestion tests",
-                    "status": "SKIPPED",
-                    "details": "No diagnostic.json file found — data ingestion tests were not run."
-                })
-
-            # Calculate overall pass/fail across whichever tests did run.
-            failing = {"FAIL", "NEEDS_WORK"}
-            oauth_passed = not any(r["status"] in failing for r in oauth_results)
-            overall_pass = data_passed and oauth_passed
+            # Run all tests via the registry — one call handles everything.
+            all_results, overall_pass = run_all_tests(config)
             overall_status = "PASS" if overall_pass else "NEEDS_WORK"
-
-            all_results = oauth_results + data_results
             write_vali_results(record_id, overall_status, all_results)
             _running_tests[record_id] = {"status": "done", "overall": overall_status}
             # Clear after a short delay so re-runs aren't blocked by the 409 guard
