@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 SANDBOX_USERS = [
     {
         "clever_id":  "58da8c65d7dc0ca0680006b6",           # Fill in Clever UUID from sandbox district
+        "district_id": "58da8a43cc70ab00017a1a87",
         "sis_id":     "738733110",  # District-assigned SIS ID
         "name":       "Diane Schmeler",
         "role":       "student",
@@ -36,6 +37,7 @@ SANDBOX_USERS = [
     },
     {
         "clever_id":  "58da8c65d7dc0ca06800071f",
+        "district_id": "58da8a43cc70ab00017a1a87",
         "sis_id":     "841688312",
         "name":       "Kim Jacobi",
         "role":       "student",
@@ -44,6 +46,7 @@ SANDBOX_USERS = [
     },
     {
         "clever_id":  "5faac8b7bc447500a10ae841",
+        "district_id": "58da8a43cc70ab00017a1a87",
         "sis_id":     "48",
         "name":       "Haylie Hauck",
         "role":       "teacher",
@@ -52,6 +55,7 @@ SANDBOX_USERS = [
     },
     {
         "clever_id":  "5faac8b7bc447500a10ae87f",
+        "district_id": "58da8a43cc70ab00017a1a87",
         "sis_id":     "69",
         "name":       "Seth Schoen",
         "role":       "teacher",
@@ -60,6 +64,7 @@ SANDBOX_USERS = [
     },
     {
         "clever_id":  "5faac8b7bc447500a10ae89c",
+        "district_id": "58da8a43cc70ab00017a1a87",
         "sis_id":     "4",
         "name":       "Admin 4",
         "role":       "admin",
@@ -68,6 +73,7 @@ SANDBOX_USERS = [
     },
     {
         "clever_id":  "5faac8b7bc447500a10ae843",
+        "district_id": "58da8a43cc70ab00017a1a87",
         "sis_id":     "50",
         "name":       "Rupert Doyle",
         "role":       "teacher",
@@ -80,12 +86,13 @@ SANDBOX_USERS = [
 # This user should have minimal optional fields set in the sandbox
 # (no email, no last name, etc.) to test graceful degradation.
 SPARSE_USER = {
-    "clever_id":  "",   # Fill in Clever UUID from sandbox district
-    "sis_id":     "",   # Fill in district SIS ID
-    "name":       "Sparse Test User",
-    "role":       "student",
-    "username":   "",
-    "password":   "",
+    "clever_id":   "",   # Fill in Clever UUID from sandbox district
+    "sis_id":      "",   # Fill in district SIS ID
+    "district_id": "58da8a43cc70ab00017a1a87",   # Clever district ID for the school picker step
+    "name":        "Sparse Test User",
+    "role":        "student",
+    "username":    "",
+    "password":    "",
 }
 
 MAX_FILE_SIZE_MB = 50
@@ -126,24 +133,164 @@ def _get_with_backoff(url, max_retries=3, base_delay=1.0, **kwargs):
     return response
 
 
-def _clever_login(page, username, password):
+def _clever_login(page, username, password, district_id=""):
     """
-    Drives Playwright through Clever's login page.
+    Drives Playwright through the full Clever login flow, including
+    the school picker step that appears before the username/password form.
+
+    The school picker appears when Clever can't determine the district
+    from context alone. Passing the district_id lets Vali type it into
+    the picker and select the correct sandbox district before proceeding.
 
     Returns True if login completed successfully, False otherwise.
     This is the shared login step used by all SSO tests — keeping it
     in one place means a Clever UI change only needs fixing here.
     """
     try:
-        # Wait for Clever's username field and fill credentials.
-        page.wait_for_selector('input[name="username"], input[type="email"]', timeout=10000)
-        page.fill('input[name="username"], input[type="email"]', username)
-        page.fill('input[name="password"], input[type="password"]', password)
+        # Step 0: Handle the auth method picker (Badge vs Password).
+        # Clever's login page at schools.clever.com now shows a card-based
+        # picker before anything else. Vali always needs the Password flow,
+        # so we click that card first if it appears.
+        try:
+            password_card_selectors = [
+                'a[aria-label="Password"]',
+                'a:has-text("Password")',
+                '[class*="AuthMethodCard"]:has-text("Password")',
+            ]
+            for selector in password_card_selectors:
+                try:
+                    page.wait_for_selector(selector, timeout=4000)
+                    page.click(selector)
+                    print(f"   [SSO] Auth method picker detected — selected Password.")
+                    page.wait_for_load_state("domcontentloaded", timeout=8000)
+                    break
+                except Exception:
+                    continue
+        except Exception:
+            pass  # Picker didn't appear — already past it, continue normally
+
+        # Step 1: Handle the school picker if it appears.
+        # The picker shows an input where the user can type a district ID
+        # or district name. We wait briefly for it — if it doesn't appear,
+        # we assume we're already past it and continue to the login form.
+        if district_id:
+            try:
+                # Common selectors for Clever's district/school search input.
+                picker_selectors = [
+                    'input[placeholder*="district"]',
+                    'input[placeholder*="school"]',
+                    'input[placeholder*="Search"]',
+                    'input[aria-label*="district"]',
+                    'input[aria-label*="school"]',
+                    '[data-testid="district-search"] input',
+                ]
+                picker_input = None
+                for selector in picker_selectors:
+                    try:
+                        page.wait_for_selector(selector, timeout=4000)
+                        picker_input = selector
+                        break
+                    except Exception:
+                        continue
+
+                if picker_input:
+                    print(f"   [SSO] School picker detected — entering district ID...")
+                    page.fill(picker_input, district_id)
+
+                    # Wait for the autocomplete dropdown to populate.
+                    # The school picker uses react-autowhatever, so we wait
+                    # for the first suggestion item to appear before clicking.
+                    suggestion_selectors = [
+                        '[id^="react-autowhatever-"] [role="option"]',
+                        '[id^="react-autowhatever-"] li',
+                        '.Autosuggest--suggestion',
+                        '[class*="suggestion"]',
+                        '[role="option"]',
+                        'li[id*="item-0"]',
+                    ]
+                    suggestion_selector = None
+                    for sel in suggestion_selectors:
+                        try:
+                            page.wait_for_selector(sel, timeout=5000)
+                            suggestion_selector = sel
+                            break
+                        except Exception:
+                            continue
+
+                    if suggestion_selector:
+                        # Click the first suggestion in the dropdown.
+                        page.click(f"{suggestion_selector}:first-child")
+                        print(f"   [SSO] District selected. Waiting for login form...")
+
+                        # Wait for Clever to navigate to the district login page.
+                        # This is a full page navigation, not just a DOM update.
+                        try:
+                            page.wait_for_load_state("networkidle", timeout=10000)
+                        except Exception:
+                            # networkidle can be flaky — fall back to domcontentloaded
+                            try:
+                                page.wait_for_load_state("domcontentloaded", timeout=5000)
+                            except Exception:
+                                pass
+                    else:
+                        # Dropdown never appeared — take a screenshot to diagnose
+                        screenshot_path = f"vali_picker_debug_{district_id}.png"
+                        try:
+                            page.screenshot(path=screenshot_path)
+                            print(f"   [!] Picker dropdown never appeared. Screenshot: {screenshot_path}")
+                        except Exception:
+                            pass
+            except Exception as e:
+                # Picker didn't appear or interaction failed — log and continue.
+                # The login form step below will time out cleanly if we're
+                # truly stuck, rather than this step silently swallowing the error.
+                print(f"   [SSO] School picker step skipped or failed: {e}")
+
+        # Step 2: Fill in Clever username and password.
+        # Clever uses different input attributes depending on user role:
+        #   - Students/Teachers: input[name="username"] or input[id="username"]
+        #   - Staff/Admins:      input[type="email"]
+        # We try each selector in order and use the first one that appears.
+        username_selectors = [
+            'input[name="username"]',
+            'input[id="username"]',
+            'input[type="email"]',
+            'input[placeholder*="username" i]',
+            'input[placeholder*="email" i]',
+            'input[autocomplete="username"]',
+        ]
+        username_selector = None
+        for sel in username_selectors:
+            try:
+                page.wait_for_selector(sel, timeout=3000)
+                username_selector = sel
+                break
+            except Exception:
+                continue
+
+        if not username_selector:
+            # Take a screenshot to help diagnose what Playwright is seeing.
+            screenshot_path = f"vali_login_debug_{username[:8]}.png"
+            try:
+                page.screenshot(path=screenshot_path)
+                print(f"   [!] Could not find username input. Screenshot saved to {screenshot_path}")
+            except Exception:
+                pass
+            raise Exception(
+                f"Could not find a username input field on the Clever login page. "
+                f"Tried: {username_selectors}. "
+                f"Check vali_login_debug_*.png for a screenshot of what Playwright saw."
+            )
+
+        page.fill(username_selector, username)
+        page.fill('input[name="password"], input[type="password"], input[id="password"]', password)
         page.click('button[type="submit"]')
-        # Wait for the redirect back to the partner's app.
+
+        # Step 3: Wait for the redirect back to the partner's app.
         # We consider login complete when we've left clever.com.
         page.wait_for_url(lambda url: "clever.com" not in url, timeout=15000)
         return True
+
     except Exception as e:
         print(f"   [!] Clever login failed: {e}")
         return False
@@ -380,8 +527,17 @@ def test_sso_role_coverage(config):
                     context.close()
                     continue
 
+                # Wait for Clever's login page to fully load after the button click.
+                # Without this, _clever_login starts looking for the username input
+                # before the page has finished navigating to clever.com.
+                try:
+                    page.wait_for_url(lambda url: "clever.com" in url, timeout=10000)
+                    page.wait_for_load_state("domcontentloaded", timeout=10000)
+                except Exception:
+                    pass  # If this times out, _clever_login will handle it
+
                 # Complete the Clever login flow.
-                login_ok = _clever_login(page, user["username"], user["password"])
+                login_ok = _clever_login(page, user["username"], user["password"], user.get("district_id", ""))
                 if not login_ok:
                     role_results[user["role"]] = (
                         False, "high",
@@ -500,7 +656,7 @@ def test_sso_missing_fields(config):
                     "SSO Behavior")
 
             login_ok = _clever_login(
-                page, SPARSE_USER["username"], SPARSE_USER["password"]
+                page, SPARSE_USER["username"], SPARSE_USER["password"], SPARSE_USER.get("district_id", "")
             )
             if not login_ok:
                 return _result("SSO: Missing field handling", "FAIL",
@@ -610,7 +766,14 @@ def test_sso_session_invalidation(config):
                 except Exception:
                     continue
 
-            login_ok = _clever_login(page_a, user_a["username"], user_a["password"])
+
+                # Wait for Clever's login page to load before attempting login.
+                try:
+                    page_a.wait_for_url(lambda url: "clever.com" in url, timeout=10000)
+                    page_a.wait_for_load_state("domcontentloaded", timeout=10000)
+                except Exception:
+                    pass
+            login_ok = _clever_login(page_a, user_a["username"], user_a["password"], user_a.get("district_id", ""))
             if not login_ok:
                 return _result("SSO: Session invalidation", "FAIL",
                     f"Could not complete login for User A ({user_a['name']}). "
@@ -640,7 +803,14 @@ def test_sso_session_invalidation(config):
                 except Exception:
                     continue
 
-            login_ok = _clever_login(page_b, user_b["username"], user_b["password"])
+
+                # Wait for Clever's login page to load before attempting login.
+                try:
+                    page_b.wait_for_url(lambda url: "clever.com" in url, timeout=10000)
+                    page_b.wait_for_load_state("domcontentloaded", timeout=10000)
+                except Exception:
+                    pass
+            login_ok = _clever_login(page_b, user_b["username"], user_b["password"], user_b.get("district_id", ""))
             if not login_ok:
                 return _result("SSO: Session invalidation", "FAIL",
                     f"Could not complete login for User B ({user_b['name']}). "
