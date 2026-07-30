@@ -27,72 +27,72 @@ from datetime import datetime, timezone
 # primary key instead of clever_id, the duplicate check will catch it.
 SANDBOX_USERS = [
     {
-        "clever_id":  "58da8c65d7dc0ca0680006b6",           # Fill in Clever UUID from sandbox district
+        "clever_id":   "58da8c65d7dc0ca0680006b6",
+        "sis_id":      "738733110",
         "district_id": "58da8a43cc70ab00017a1a87",
-        "sis_id":     "738733110",  # District-assigned SIS ID
-        "name":       "Diane Schmeler",
-        "role":       "student",
-        "username":   "738733110",           # Fill in Clever sandbox login
-        "password":   "738733110",           # Fill in Clever sandbox password
+        "name":        "Diane Schmeler",
+        "role":        "student",
+        "username":    "738733110",
+        "password":    "738733110",
     },
     {
-        "clever_id":  "58da8c65d7dc0ca06800071f",
+        "clever_id":   "58da8c65d7dc0ca06800071f",
+        "sis_id":      "841688312",
         "district_id": "58da8a43cc70ab00017a1a87",
-        "sis_id":     "841688312",
-        "name":       "Kim Jacobi",
-        "role":       "student",
-        "username":   "841688312",
-        "password":   "841688312",
+        "name":        "Kim Schmeler",
+        "role":        "student",
+        "username":    "841688312",
+        "password":    "841688312",
     },
     {
-        "clever_id":  "5faac8b7bc447500a10ae841",
+        "clever_id":   "5faac8b7bc447500a10ae841",
+        "sis_id":      "48",
         "district_id": "58da8a43cc70ab00017a1a87",
-        "sis_id":     "48",
-        "name":       "Haylie Hauck",
-        "role":       "teacher",
-        "username":   "830340",
-        "password":   "830340",
+        "name":        "Haylie Hauck",
+        "role":        "teacher",
+        "username":    "830340",
+        "password":    "830340",
     },
     {
-        "clever_id":  "5faac8b7bc447500a10ae87f",
+        "clever_id":   "5faac8b7bc447500a10ae87f",
+        "sis_id":      "69",
         "district_id": "58da8a43cc70ab00017a1a87",
-        "sis_id":     "69",
-        "name":       "Seth Schoen",
-        "role":       "teacher",
-        "username":   "256742",
-        "password":   "256742",
+        "name":        "Seth Schoen",
+        "role":        "teacher",
+        "username":    "256742",
+        "password":    "256742",
     },
     {
-        "clever_id":  "5faac8b7bc447500a10ae89c",
+        "clever_id":   "5faac8b7bc447500a10ae89c",
+        "sis_id":      "4",
         "district_id": "58da8a43cc70ab00017a1a87",
-        "sis_id":     "4",
-        "name":       "Admin 4",
-        "role":       "admin",
-        "username":   "esmyth@example.com",
-        "password":   "4",
+        "name":        "Emily Smyth",
+        "role":        "admin",
+        "username":    "esmyth@example.com",
+        "password":    "4",
     },
     {
-        "clever_id":  "5faac8b7bc447500a10ae843",
+        "clever_id":   "5faac8b7bc447500a10ae843",
+        "sis_id":      "50",
         "district_id": "58da8a43cc70ab00017a1a87",
-        "sis_id":     "50",
-        "name":       "Rupert Doyle",
-        "role":       "teacher",
-        "username":   "473664",
-        "password":   "473664",
+        "name":        "Rupert Doyle",
+        "role":        "teacher",
+        "username":    "473664",
+        "password":    "473664",
     },
 ]
 
 # One sparse-profile user for the missing field handling test.
-# This user should have minimal optional fields set in the sandbox
-# (no email, no last name, etc.) to test graceful degradation.
+# This user has minimal optional fields set in the sandbox to test
+# whether the partner app handles missing non-required fields gracefully.
 SPARSE_USER = {
-    "clever_id":   "",   # Fill in Clever UUID from sandbox district
-    "sis_id":      "",   # Fill in district SIS ID
-    "district_id": "58da8a43cc70ab00017a1a87",   # Clever district ID for the school picker step
+    "clever_id":   "58da8c63d7dc0ca0680003ed",
+    "sis_id":      "100095233",
+    "district_id": "58da8a43cc70ab00017a1a87",
     "name":        "Sparse Test User",
     "role":        "student",
-    "username":    "",
-    "password":    "",
+    "username":    "100095233",
+    "password":    "100095233",
 }
 
 MAX_FILE_SIZE_MB = 50
@@ -133,162 +133,249 @@ def _get_with_backoff(url, max_retries=3, base_delay=1.0, **kwargs):
     return response
 
 
+def _click_password_card(page):
+    """
+    Clicks the Password card on Clever's auth method picker (Badge | Password).
+    Called at two points in the login flow — once at schools.clever.com and
+    once after district selection on the district's own auth page.
+    Returns True if the card was found and clicked, False if not present.
+    """
+    selectors = [
+        'a[aria-label="Password"]',
+        'a:has-text("Password")',
+        '[class*="AuthMethodCard"]:has-text("Password")',
+    ]
+    for selector in selectors:
+        try:
+            page.wait_for_selector(selector, timeout=4000)
+            page.click(selector)
+            page.wait_for_load_state("domcontentloaded", timeout=8000)
+            return True
+        except Exception:
+            continue
+    return False
+
+
 def _clever_login(page, username, password, district_id=""):
     """
-    Drives Playwright through the full Clever login flow, including
-    the school picker step that appears before the username/password form.
+    Drives Playwright through Clever's login flow (as of July 2026):
 
-    The school picker appears when Clever can't determine the district
-    from context alone. Passing the district_id lets Vali type it into
-    the picker and select the correct sandbox district before proceeding.
+    Step 1 — Auth method picker: schools.clever.com shows Badge | Password.
+              Vali clicks Password.
+
+    Step 2 — School picker: type district ID, wait for suggestion card,
+              click it. Clever navigates to the district login page.
+
+    Step 3 — Username form: enter username, click Next.
+
+    Step 4 — Password form (separate page): enter password, click Next.
+
+    Step 5 — Wait for redirect back to the partner app.
 
     Returns True if login completed successfully, False otherwise.
-    This is the shared login step used by all SSO tests — keeping it
-    in one place means a Clever UI change only needs fixing here.
     """
     try:
-        # Step 0: Handle the auth method picker (Badge vs Password).
-        # Clever's login page at schools.clever.com now shows a card-based
-        # picker before anything else. Vali always needs the Password flow,
-        # so we click that card first if it appears.
-        try:
-            password_card_selectors = [
-                'a[aria-label="Password"]',
-                'a:has-text("Password")',
-                '[class*="AuthMethodCard"]:has-text("Password")',
+        # Step 1: Auth method picker — click Password card.
+        print(f"   [SSO] Step 1: Looking for auth method picker...")
+        password_card_selectors = [
+            'a[aria-label="Password"]',
+            'a:has-text("Password")',
+            '[class*="AuthMethodCard"]:has-text("Password")',
+        ]
+        for selector in password_card_selectors:
+            try:
+                page.wait_for_selector(selector, timeout=5000)
+                page.click(selector)
+                page.wait_for_load_state("domcontentloaded", timeout=8000)
+                print(f"   [SSO] Password card clicked. URL: {page.url}")
+                break
+            except Exception:
+                continue
+
+        # Step 2: School picker — type district ID and click the suggestion.
+        if district_id:
+            print(f"   [SSO] Step 2: Looking for school picker... (current URL: {page.url})")
+            # Wait explicitly for the school-picker URL before looking for the input.
+            # This ensures we're on the right page before any selector search begins.
+            try:
+                page.wait_for_url(lambda url: "school-picker" in url, timeout=8000)
+                page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                pass
+            print(f"   [SSO] School picker URL confirmed: {page.url}")
+            picker_selectors = [
+                'input[title="School name"]',
+                'input[aria-labelledby="school-picker-heading"]',
+                'input[class*="Autosuggest"]',
+                'input[placeholder*="school" i]',
             ]
-            for selector in password_card_selectors:
+            picker_input = None
+            for selector in picker_selectors:
                 try:
-                    page.wait_for_selector(selector, timeout=4000)
-                    page.click(selector)
-                    print(f"   [SSO] Auth method picker detected — selected Password.")
-                    page.wait_for_load_state("domcontentloaded", timeout=8000)
+                    page.wait_for_selector(selector, timeout=5000)
+                    picker_input = selector
                     break
                 except Exception:
                     continue
-        except Exception:
-            pass  # Picker didn't appear — already past it, continue normally
 
-        # Step 1: Handle the school picker if it appears.
-        # The picker shows an input where the user can type a district ID
-        # or district name. We wait briefly for it — if it doesn't appear,
-        # we assume we're already past it and continue to the login form.
-        if district_id:
-            try:
-                # Common selectors for Clever's district/school search input.
-                picker_selectors = [
-                    'input[placeholder*="district"]',
-                    'input[placeholder*="school"]',
-                    'input[placeholder*="Search"]',
-                    'input[aria-label*="district"]',
-                    'input[aria-label*="school"]',
-                    '[data-testid="district-search"] input',
-                ]
-                picker_input = None
-                for selector in picker_selectors:
-                    try:
-                        page.wait_for_selector(selector, timeout=4000)
-                        picker_input = selector
+            if not picker_input:
+                screenshot_path = f"vali_picker_debug_{district_id[:8]}.png"
+                page.screenshot(path=screenshot_path)
+                raise Exception(
+                    f"School picker input not found. "
+                    f"Screenshot saved to {screenshot_path}"
+                )
+
+            print(f"   [SSO] School picker found. Typing district ID...")
+            page.click(picker_input)
+            page.fill(picker_input, "")
+            # type() fires real keystroke events which trigger the React
+            # autocomplete. delay=80ms mimics human typing pace.
+            page.type(picker_input, district_id, delay=80)
+
+            # Wait for the suggestion card then click it.
+            suggestion_selectors = [
+                '[id^="react-autowhatever-"] li',
+                'li[id*="item-0"]',
+                '.Autosuggest--suggestion',
+                '[role="option"]',
+            ]
+            # Wait for the suggestion to appear, then click it.
+            # We wait for the element to be visible and stable before clicking.
+            suggestion_selectors_ordered = [
+                f'[id^="react-autowhatever-"] li:has-text("{district_id}")',
+                f'[role="option"]:has-text("{district_id}")',
+                '[id^="react-autowhatever-"] li:first-child',
+                'li[id*="item-0"]',
+                '.Autosuggest--suggestion',
+                '[role="option"]',
+            ]
+            suggestion_clicked = False
+            for sel in suggestion_selectors_ordered:
+                try:
+                    page.wait_for_selector(sel, timeout=6000)
+                    # Small delay to let the suggestion card fully render
+                    # before clicking — React can still be updating state.
+                    page.wait_for_timeout(500)
+                    # Scroll into view and click via JavaScript to ensure
+                    # the click lands on the element regardless of overlays.
+                    element = page.query_selector(sel)
+                    if element:
+                        element.scroll_into_view_if_needed()
+                        element.click()
+                        suggestion_clicked = True
+                        print(f"   [SSO] District suggestion clicked via selector: {sel}")
                         break
-                    except Exception:
-                        continue
+                except Exception:
+                    continue
 
-                if picker_input:
-                    print(f"   [SSO] School picker detected — entering district ID...")
-                    page.fill(picker_input, district_id)
+            if not suggestion_clicked:
+                screenshot_path = f"vali_picker_debug_{district_id[:8]}.png"
+                page.screenshot(path=screenshot_path)
+                raise Exception(
+                    f"District suggestion never appeared for ID '{district_id}'. "
+                    f"Screenshot saved to {screenshot_path}"
+                )
 
-                    # Wait for the autocomplete dropdown to populate.
-                    # The school picker uses react-autowhatever, so we wait
-                    # for the first suggestion item to appear before clicking.
-                    suggestion_selectors = [
-                        '[id^="react-autowhatever-"] [role="option"]',
-                        '[id^="react-autowhatever-"] li',
-                        '.Autosuggest--suggestion',
-                        '[class*="suggestion"]',
-                        '[role="option"]',
-                        'li[id*="item-0"]',
-                    ]
-                    suggestion_selector = None
-                    for sel in suggestion_selectors:
-                        try:
-                            page.wait_for_selector(sel, timeout=5000)
-                            suggestion_selector = sel
-                            break
-                        except Exception:
-                            continue
+            # Wait explicitly for the URL to change away from school-picker.
+            # This is the definitive signal that the district was selected.
+            print(f"   [SSO] Waiting for navigation away from school-picker...")
+            try:
+                page.wait_for_url(
+                    lambda url: "school-picker" not in url,
+                    timeout=12000
+                )
+            except Exception:
+                screenshot_path = f"vali_picker_stuck_{district_id[:8]}.png"
+                page.screenshot(path=screenshot_path)
+                raise Exception(
+                    f"URL did not change away from school-picker after clicking suggestion. "
+                    f"Screenshot: {screenshot_path}"
+                )
 
-                    if suggestion_selector:
-                        # Click the first suggestion in the dropdown.
-                        page.click(f"{suggestion_selector}:first-child")
-                        print(f"   [SSO] District selected. Waiting for login form...")
+            page.wait_for_load_state("domcontentloaded", timeout=8000)
+            print(f"   [SSO] Post-picker URL: {page.url}")
 
-                        # Wait for Clever to navigate to the district login page.
-                        # This is a full page navigation, not just a DOM update.
-                        try:
-                            page.wait_for_load_state("networkidle", timeout=10000)
-                        except Exception:
-                            # networkidle can be flaky — fall back to domcontentloaded
-                            try:
-                                page.wait_for_load_state("domcontentloaded", timeout=5000)
-                            except Exception:
-                                pass
-                    else:
-                        # Dropdown never appeared — take a screenshot to diagnose
-                        screenshot_path = f"vali_picker_debug_{district_id}.png"
-                        try:
-                            page.screenshot(path=screenshot_path)
-                            print(f"   [!] Picker dropdown never appeared. Screenshot: {screenshot_path}")
-                        except Exception:
-                            pass
-            except Exception as e:
-                # Picker didn't appear or interaction failed — log and continue.
-                # The login form step below will time out cleanly if we're
-                # truly stuck, rather than this step silently swallowing the error.
-                print(f"   [SSO] School picker step skipped or failed: {e}")
+        # Step 2b: Auth method picker appears again after district selection.
+        # Clever shows Badge | Password a second time at the district level.
+        print(f"   [SSO] Step 2b: Checking for second auth method picker...")
+        _click_password_card(page)
 
-        # Step 2: Fill in Clever username and password.
-        # Clever uses different input attributes depending on user role:
-        #   - Students/Teachers: input[name="username"] or input[id="username"]
-        #   - Staff/Admins:      input[type="email"]
-        # We try each selector in order and use the first one that appears.
+        # Step 3: Username form — enter username and click Next.
+        print(f"   [SSO] Step 3: Looking for username input...")
         username_selectors = [
             'input[name="username"]',
             'input[id="username"]',
+            'input[type="text"]',
             'input[type="email"]',
-            'input[placeholder*="username" i]',
-            'input[placeholder*="email" i]',
             'input[autocomplete="username"]',
         ]
         username_selector = None
         for sel in username_selectors:
             try:
-                page.wait_for_selector(sel, timeout=3000)
+                page.wait_for_selector(sel, timeout=6000)
                 username_selector = sel
                 break
             except Exception:
                 continue
 
         if not username_selector:
-            # Take a screenshot to help diagnose what Playwright is seeing.
             screenshot_path = f"vali_login_debug_{username[:8]}.png"
-            try:
-                page.screenshot(path=screenshot_path)
-                print(f"   [!] Could not find username input. Screenshot saved to {screenshot_path}")
-            except Exception:
-                pass
+            page.screenshot(path=screenshot_path)
             raise Exception(
-                f"Could not find a username input field on the Clever login page. "
-                f"Tried: {username_selectors}. "
-                f"Check vali_login_debug_*.png for a screenshot of what Playwright saw."
+                f"Username input not found. Tried: {username_selectors}. "
+                f"Screenshot saved to {screenshot_path}"
             )
 
         page.fill(username_selector, username)
-        page.fill('input[name="password"], input[type="password"], input[id="password"]', password)
-        page.click('button[type="submit"]')
+        print(f"   [SSO] Username filled. URL before Next: {page.url}")
+        print(f"   [SSO] Clicking Next...")
 
-        # Step 3: Wait for the redirect back to the partner's app.
-        # We consider login complete when we've left clever.com.
+        for sel in ['button:has-text("Next")', 'button[type="submit"]']:
+            try:
+                page.click(sel, timeout=3000)
+                break
+            except Exception:
+                continue
+
+        # Step 4: Password form — appears on a separate page after username.
+        print(f"   [SSO] Step 4: Looking for password input...")
+        password_selectors = [
+            'input[name="password"]',
+            'input[id="password"]',
+            'input[type="password"]',
+        ]
+        password_selector = None
+        for sel in password_selectors:
+            try:
+                page.wait_for_selector(sel, timeout=8000)
+                password_selector = sel
+                break
+            except Exception:
+                continue
+
+        if not password_selector:
+            screenshot_path = f"vali_password_debug_{username[:8]}.png"
+            page.screenshot(path=screenshot_path)
+            raise Exception(
+                f"Password input not found after submitting username. "
+                f"Screenshot saved to {screenshot_path}"
+            )
+
+        page.fill(password_selector, password)
+        print(f"   [SSO] Password filled. Clicking Next...")
+
+        for sel in ['button:has-text("Next")', 'button[type="submit"]']:
+            try:
+                page.click(sel, timeout=3000)
+                break
+            except Exception:
+                continue
+
+        # Step 5: Wait for redirect back to the partner app.
+        print(f"   [SSO] Step 5: Waiting for redirect to partner app...")
         page.wait_for_url(lambda url: "clever.com" not in url, timeout=15000)
+        print(f"   [SSO] Redirected to: {page.url}")
         return True
 
     except Exception as e:
@@ -487,13 +574,23 @@ def test_sso_role_coverage(config):
     role_results = {}   # role -> (success, confidence, detail)
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        browser = pw.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+            ]
+        )
+        # Use a real Chrome user agent so Clever's servers don't
+        # fingerprint the request as coming from a headless bot.
+        ua = (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Safari/537.36"
+        )
 
         for user in test_users:
             print(f"   [SSO] Testing {user['role']} login: {user['name']}...")
-            # Each user gets a fresh browser context — equivalent to
-            # a clean incognito window with no shared session state.
-            context = browser.new_context()
+            context = browser.new_context(user_agent=ua)
             page = context.new_page()
 
             try:
@@ -627,8 +724,16 @@ def test_sso_missing_fields(config):
             "SSO Behavior")
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
-        context = browser.new_context()
+        browser = pw.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"]
+        )
+        ua = (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Safari/537.36"
+        )
+        context = browser.new_context(user_agent=ua)
         page = context.new_page()
 
         try:
@@ -745,11 +850,19 @@ def test_sso_session_invalidation(config):
     user_b = credentialled[1]
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        browser = pw.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"]
+        )
+        ua = (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Safari/537.36"
+        )
 
         # Step 1: Log in as User A and capture a URL that requires auth.
         print(f"   [SSO] Session test: logging in as User A ({user_a['name']})...")
-        context_a = browser.new_context()
+        context_a = browser.new_context(user_agent=ua)
         page_a = context_a.new_page()
 
         try:
@@ -791,7 +904,7 @@ def test_sso_session_invalidation(config):
 
         # Step 2: Log in as User B in a separate context (simulates a new device).
         print(f"   [SSO] Session test: logging in as User B ({user_b['name']})...")
-        context_b = browser.new_context()
+        context_b = browser.new_context(user_agent=ua)
         page_b = context_b.new_page()
 
         try:
