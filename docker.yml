@@ -1,0 +1,95 @@
+# ---------------------------------------------------------------------------
+# Clever Vali — Docker Build & Publish Workflow
+# ---------------------------------------------------------------------------
+# This workflow automatically builds and publishes a Docker image to GitHub
+# Container Registry (ghcr.io) in two situations:
+#
+#   1. When you push a version tag (e.g. v1.0.0) — publishes a versioned
+#      image that teammates can pin to a specific release
+#
+#   2. When you push to main — publishes the `latest` tag so teammates
+#      always have access to the most current build
+#
+# Teammates never need to build the image themselves. They just pull it.
+# ---------------------------------------------------------------------------
+
+name: Build and publish Docker image
+
+on:
+  push:
+    branches:
+      - main          # Publishes the `latest` tag on every push to main
+    tags:
+      - "v*.*.*"      # Publishes a versioned tag when you push e.g. v1.2.0
+
+# Required for pushing to GitHub Container Registry
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ---------------------------------------------------------------------------
+      # Step 1: Check out the code
+      # ---------------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------------------
+      # Step 2: Log in to GitHub Container Registry
+      # ---------------------------------------------------------------------------
+      # GITHUB_TOKEN is automatically provided by GitHub Actions — you don't
+      # need to create or store any secrets for this to work.
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---------------------------------------------------------------------------
+      # Step 3: Extract metadata for tagging
+      # ---------------------------------------------------------------------------
+      # This step figures out what tags to apply to the image based on what
+      # triggered the workflow:
+      #   - Push to main       → ghcr.io/your-org/clever-vali:latest
+      #   - Push of tag v1.2.0 → ghcr.io/your-org/clever-vali:v1.2.0
+      #                          ghcr.io/your-org/clever-vali:1.2.0
+      #                          ghcr.io/your-org/clever-vali:latest
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      # ---------------------------------------------------------------------------
+      # Step 4: Set up Docker Buildx
+      # ---------------------------------------------------------------------------
+      # Buildx is Docker's extended build tooling. It enables build caching,
+      # which significantly speeds up subsequent builds when only code changes
+      # (not dependencies) have been updated.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ---------------------------------------------------------------------------
+      # Step 5: Build and push the image
+      # ---------------------------------------------------------------------------
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Cache layers between builds so unchanged dependency installs
+          # don't re-run on every push. Stored in GitHub's cache service.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

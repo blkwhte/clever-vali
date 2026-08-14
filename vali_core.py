@@ -574,11 +574,18 @@ def test_sso_role_coverage(config):
     role_results = {}   # role -> (success, confidence, detail)
 
     with sync_playwright() as pw:
+        # PLAYWRIGHT_CHROMIUM_SANDBOX=false is set by the Dockerfile when
+        # running inside Docker. Chromium requires --no-sandbox in that
+        # environment because containers don't support kernel namespacing.
+        import os as _os
+        sandbox_args = [] if _os.getenv("PLAYWRIGHT_CHROMIUM_SANDBOX", "true") == "false" else []
+        chromium_args = ["--disable-blink-features=AutomationControlled"]
+        if _os.getenv("PLAYWRIGHT_CHROMIUM_SANDBOX") == "false":
+            chromium_args.append("--no-sandbox")
+
         browser = pw.chromium.launch(
             headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-            ]
+            args=chromium_args,
         )
         # Use a real Chrome user agent so Clever's servers don't
         # fingerprint the request as coming from a headless bot.
@@ -724,9 +731,13 @@ def test_sso_missing_fields(config):
             "SSO Behavior")
 
     with sync_playwright() as pw:
+        import os as _os
+        chromium_args = ["--disable-blink-features=AutomationControlled"]
+        if _os.getenv("PLAYWRIGHT_CHROMIUM_SANDBOX") == "false":
+            chromium_args.append("--no-sandbox")
         browser = pw.chromium.launch(
             headless=True,
-            args=["--disable-blink-features=AutomationControlled"]
+            args=chromium_args,
         )
         ua = (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -850,9 +861,13 @@ def test_sso_session_invalidation(config):
     user_b = credentialled[1]
 
     with sync_playwright() as pw:
+        import os as _os
+        chromium_args = ["--disable-blink-features=AutomationControlled"]
+        if _os.getenv("PLAYWRIGHT_CHROMIUM_SANDBOX") == "false":
+            chromium_args.append("--no-sandbox")
         browser = pw.chromium.launch(
             headless=True,
-            args=["--disable-blink-features=AutomationControlled"]
+            args=chromium_args,
         )
         ua = (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "

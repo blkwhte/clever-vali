@@ -1,0 +1,44 @@
+# ---------------------------------------------------------------------------
+# Clever Vali — .dockerignore
+# ---------------------------------------------------------------------------
+# Files listed here are excluded from the Docker build context. This keeps
+# the image lean and prevents sensitive files from being baked into it.
+# Think of it like .gitignore but for Docker builds.
+# ---------------------------------------------------------------------------
+
+# Environment and credentials — must never be baked into the image.
+# Teammates supply their own .env at runtime via --env-file.
+.env
+
+# Git internals — not needed inside the container
+.git
+.gitignore
+.github
+
+# Python runtime artifacts — Docker builds from source, not cached bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Runtime output files — these are generated at runtime and should live
+# on the host machine, not inside the image
+certification_report_*.json
+diagnostic.json
+vali_login_debug_*.png
+vali_picker_debug_*.png
+vali_picker_stuck_*.png
+vali_password_debug_*.png
+
+# macOS metadata
+.DS_Store
+
+# Documentation — not needed to run the tool
+README.md
+vali-capabilities.md
+vali-dev-doc.md
+
+# Editor config
+.vscode/
+.idea/
