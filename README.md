@@ -1,248 +1,234 @@
-# Vali — Clever Secure Sync Validator
+# Vali — Clever Secure Sync Certification Tool
 
-Vali is a command-line tool that automatically validates a partner application's Clever Secure Sync integration before it goes live into production. It runs two suites of tests — OAuth security and data ingestion — and produces a timestamped JSON certification report.
+Vali is an internal tool that automates the technical validation of partner applications seeking Clever Secure Sync certification. It runs a battery of OAuth security and SSO browser tests against a partner's integration and surfaces the results alongside their certification form responses — all in one place.
 
-Vali is designed to be run by the **partner's development team** on their local machine, against their local development server, before they submit the Clever certification form.
+Vali has two interfaces:
+
+- **Internal dashboard** (`/`) — for the Clever team to run and review tests across all partners
+- **Partner mode** (`/partner`) — a self-service interface partners use to test their own integration before submitting the certification form
 
 ---
 
 ## What Vali Tests
 
-Vali covers the technical checks that are objective and automatable. It is designed to complement, not replace, the Clever certification form.
+Vali covers the objective, automatable requirements of the certification process. It is designed to complement, not replace, the Clever certification form.
 
 ### OAuth Security Tests
-These tests probe the partner's Clever callback URL directly to verify it handles bad or malicious requests safely.
+
+These tests make direct HTTP requests to the partner's Redirect URI to verify it handles malicious or malformed requests safely.
 
 | Test | What it checks |
 |---|---|
-| Missing State Parameter | The app rejects OAuth callbacks that arrive without a `state` parameter |
-| Forged State Parameter | The app rejects a `state` value it never issued (CSRF protection) |
-| Graceful Code Rejection | The app handles an invalid authorization code without crashing (no 500 errors) |
+| Missing state parameter | App rejects OAuth callbacks with no `state` parameter (CSRF protection) |
+| Forged state parameter | App rejects a `state` value it never issued — not just any state |
+| Graceful code rejection | App handles an invalid authorization code without crashing (no 500 errors) |
 
-### Data Ingestion Tests
-These tests analyze a JSON file that the partner exports from their application after syncing against the Clever sandbox district.
+All OAuth tests include exponential backoff and jitter on 429 responses, retrying up to three times before reporting a rate limit failure.
+
+### SSO Behavior Tests
+
+These tests use Playwright to drive a real browser through the partner's full Clever login flow. They require the `#DEMO Certification ISD - Events` sandbox district to be connected to the partner's application before running.
 
 | Test | What it checks |
 |---|---|
-| Clever ID as Primary Key | No duplicate Clever IDs exist in the partner's database |
-| Edge Case Ingestion | All expected sandbox records are present, including users with short IDs, long IDs, and non-student roles (admins, teachers) |
+| Role coverage | Logs in as a student, teacher, and admin — verifies each role is recognised after login |
+| Missing field handling | Logs in as a sparse-profile user — verifies the app handles missing optional fields gracefully |
+| Session invalidation | Logs in as two users sequentially — verifies User A's session is invalidated when User B logs in |
+
+### What Vali Does Not Test
+
+The following requirements are evaluated through partner self-reporting on the certification form and human review:
+
+- Matching strategy for existing users
+- Archive and restore behavior
+- School year rollover handling
+- Historical data preservation
+- Sync logging and alerting
+- Retry logic for API failures
 
 ---
 
-## Requirements
+## Project Structure
 
-- Python 3.8 or higher
-- The `requests` library (`pip install requests`)
-- Your Clever dev app is connected with the #DEMO Certification ISD - Events sandbox district; reach out to integrations@clever.com if you're not connected
-- Your local development server must be running before you start Vali
-- A `diagnostic.json` file exported from your application (see below)
+```
+vali_core.py        — Test engine: all test functions, test registry, Playwright login helpers, sandbox user config
+dashboard.py        — Flask web server: internal dashboard and partner mode UI and API routes
+airtable_client.py  — Airtable read/write layer
+requirements.txt    — Python dependencies
+.env                — Local credentials (never committed — see setup below)
+.gitignore          — Ensures .env and runtime artifacts stay out of the repo
+```
 
 ---
 
 ## Setup
 
-**1. Clone the repo and install dependencies**
+### Requirements
+
+- Python 3.8 or higher
+- A `.env` file with Airtable credentials (get this from a team member — do not share via Slack or email in plaintext)
+
+### Installation
 
 ```bash
-git clone https://github.com/blkwhte/clever-vali
-cd vali
-pip install requests
+git clone https://github.com/your-org/clever-vali.git
+cd clever-vali
+python3 -m pip install -r requirements.txt
+python3 -m playwright install chromium
 ```
 
-**2. Start your local development server**
+### Environment variables
 
-Vali will make real HTTP requests to your callback URL, so your app needs to be running. The default URL Vali expects is:
+Create a `.env` file in the project root with the following values. Get the actual values from a team member.
 
 ```
-http://localhost:8080/auth/clever/callback
+AIRTABLE_API_TOKEN=your_token_here
+AIRTABLE_SECURE_SYNC_BASE_ID=your_base_id_here
+AIRTABLE_SECURE_SYNC_TABLE_NAME=your_table_name_here
 ```
 
-If your callback URL is different, you can set it during the setup wizard when you run Vali.
+### Required Airtable columns
 
-**3. Generate your diagnostic.json file**
+The Secure Sync Airtable base needs the following columns for Vali to write results back. Add them if they don't exist:
 
-Before running Vali, your application needs to sync against **Clever's #DEMO Certification ISD - Events sandbox district** and export a snapshot of the user records it ingested. Save this as `diagnostic.json` in the same folder as `vali.py`.
+| Column name | Field type |
+|---|---|
+| `Vali Status` | Single line text |
+| `Vali Last Run` | Single line text |
+| `Vali Report` | Long text — **plain text only, rich text must be disabled** |
+| `Redirect URI` | Single line text |
+| `Login URL` | Single line text |
 
-The file must follow this format:
+### Starting the dashboard
 
-```json
-{
-  "users": [
-    {
-      "clever_id": "abc123",
-      "sis_id": "456",
-      "status": "active"
-    }
-  ]
-}
+```bash
+python3 dashboard.py
 ```
 
-Every user object must include at minimum a `clever_id` and a `sis_id`. The `status` field is used to determine whether a user is active. Vali supports several common status conventions — see [Active Status Formats](#active-status-formats) below.
+The dashboard will be available at `http://localhost:5000`. Partner mode is at `http://localhost:5000/partner`.
 
 ---
 
-## Running Vali
+## Internal Dashboard
 
-```bash
-python vali.py
-```
+The internal dashboard is for the Clever team. It connects to the Secure Sync Airtable base and shows all partner certification submissions in the sidebar.
 
-Vali will greet you with a short setup wizard:
+**Before running tests on a partner:**
+- Connect the `#DEMO Certification ISD - Events` sandbox district to their Clever application
+- Ensure their `Redirect URI` and `Login URL` fields are populated in Airtable
 
-```
-==================================================
-🧙 Welcome to the Clever Vali Setup Wizard
-==================================================
-Run with default settings? (Y/n):
-```
+**Running tests:**
+1. Select a partner from the sidebar
+2. Click **Run tests**
+3. Results populate automatically when the run completes — no refresh needed
+4. Results are written back to the partner's Airtable row automatically
 
-**Pressing Enter (or typing Y)** accepts the defaults and runs immediately:
-- State parameter checks: **enabled**
-- Callback URL: `http://localhost:8080/auth/clever/callback`
-- Diagnostic file: `diagnostic.json`
+**Tabs:**
+- **Test results** — all test outcomes grouped by category with expandable detail messages
+- **Airtable responses** — the partner's full certification form responses
 
-**Typing N** lets you customize each setting before the tests run.
+**Syncing:** Click the **⟳** button in the sidebar header to pull fresh data from Airtable without losing your current selection.
 
 ---
 
-## Reading Your Results
+## Partner Mode
 
-After Vali finishes, it prints a summary and saves a full report to a timestamped file in the same directory:
+Partner mode is a self-service interface at `http://localhost:5000/partner` that partners use to test their own integration.
 
-```
-certification_report_20260518_155439.json
-```
+The flow has three steps:
 
-Each result in the report has one of three statuses:
+1. **Your details** — Partners enter their Dev Account Client ID, Redirect URI, and optionally their Login Page URL
+2. **Running** — A progress bar shows test status while tests run in the background
+3. **Results** — An overall PASS/FAIL result with expandable detail cards for each test
+
+Partner results are not written to Airtable — they're returned directly to the partner's browser session only.
+
+**Before directing a partner to partner mode:**
+- Connect the `#DEMO Certification ISD - Events` sandbox district to their application
+- Let them know automated login tests will be run using sandbox credentials
+
+---
+
+## Result Statuses
 
 | Status | Meaning |
 |---|---|
-| `PASS` | This requirement is met. No action needed. |
-| `NEEDS_WORK` | Something unexpected happened. Review the details and fix before resubmitting. |
-| `FAIL` | This requirement is not met. The details field explains what went wrong and how to fix it. |
-| `SKIPPED` | This test was opted out of during setup (e.g. state parameter check when your app doesn't use state). |
+| `PASS` | Requirement is met |
+| `NEEDS_WORK` | Something unexpected or ambiguous — review the detail message |
+| `FAIL` | Requirement is not met — the detail message explains what to fix |
+| `SKIPPED` | Test was not applicable (e.g. app doesn't use state parameter, Playwright not installed) |
 
-The report's `overall_status` is `PASS` only if every test either passed or was intentionally skipped. Any `FAIL` or `NEEDS_WORK` result will set `overall_status` to `NEEDS_WORK`.
+The overall status is `PASS` only when every test either passes or is intentionally skipped.
 
-### Example Report
-
-```json
-{
-  "validator_version": "v2.1-ArtifactMode",
-  "timestamp": "2026-05-18T15:54:39+00:00",
-  "overall_status": "PASS",
-  "results": [
-    {
-      "requirement": "OAuth: Missing State Rejected",
-      "status": "PASS",
-      "details": "App correctly rejected auth request without state."
-    },
-    {
-      "requirement": "OAuth: Forged State Rejected",
-      "status": "PASS",
-      "details": "App correctly rejected a state value it never issued."
-    },
-    {
-      "requirement": "OAuth: Graceful Code Rejection",
-      "status": "PASS",
-      "details": "App safely handled invalid code."
-    },
-    {
-      "requirement": "Use Clever ID as primary identifier",
-      "status": "PASS",
-      "details": "No duplicate Clever IDs detected."
-    },
-    {
-      "requirement": "Utilize all relevant data (Edge Case Ingestion)",
-      "status": "PASS",
-      "details": "All Day 1 edge case records successfully ingested."
-    }
-  ]
-}
-```
+For SSO role coverage, a medium-confidence result (redirect detected but user name not visible on page) produces `NEEDS_WORK` rather than `FAIL` — some app types like educational games don't display user names. These are intended for manual spot-check rather than automatic rejection.
 
 ---
 
 ## Troubleshooting Common Failures
 
-### OAuth: Missing State Rejected — FAIL
-Your app accepted an OAuth callback that had no `state` parameter. The `state` parameter is required for CSRF protection. Every callback your app receives should be rejected if `state` is absent or doesn't match an active session.
+### OAuth: Missing state rejected — FAIL
+The app accepted an OAuth callback with no `state` parameter. Every callback must be rejected if `state` is absent. If your app does not use the state parameter, this test will be marked SKIPPED rather than FAIL — ensure your certification form reflects this.
 
-### OAuth: Forged State Rejected — FAIL
-Your app accepted a `state` value (`VALI_CSRF_PROBE_NOT_A_REAL_SESSION`) that it never issued. Your app must validate the `state` value against its own session store on every callback — not just check that *some* state was present.
+### OAuth: Forged state rejected — FAIL
+The app accepted a state value (`VALI_CSRF_PROBE_NOT_A_REAL_SESSION`) it never issued. State must be validated against an active session on every callback — not just checked for presence.
 
-### OAuth: Graceful Code Rejection — FAIL (500 error)
-Your app crashed when Clever rejected the invalid authorization code. Add error handling around your token exchange step so that a rejected code results in a clean redirect or error page, not a server crash.
+### OAuth: Graceful code rejection — FAIL (500 error)
+The app crashed when Clever rejected the invalid authorization code. Add error handling around the token exchange step so a rejected code results in a clean redirect or error page.
 
-### Edge Case Ingestion — FAIL
-One or more expected sandbox users were not found in your `diagnostic.json`. The failure message will tell you exactly which users are missing and what roles they belong to. Common causes:
+### SSO: Role coverage — NEEDS_WORK or FAIL
+One or more roles did not produce a high-confidence login result. Common causes:
 
-- **Pagination:** Your app only fetched the first page of results from the Clever API. Make sure you follow `next` links until all pages are retrieved.
-- **Role filtering:** If all missing records share the same role (e.g. all admins), your app may be skipping that role entirely. Check your ingestion logic and token scopes.
-- **Active status:** Confirm the missing users are marked active in your system.
-- **Token scope:** Ensure your Clever API token has permission to read `sis_id` for all user types.
+- **Role filtering** — the app may not be provisioning teachers or admins. Check ingestion logic and token scopes.
+- **Pagination** — the app may only be fetching the first page of Clever API results.
+- **Name not displayed** — apps that don't show user names (e.g. games) will produce a medium-confidence NEEDS_WORK. This is expected and requires a quick manual spot-check.
 
-You can read more about what edge cases are tested on this page of the Clever Dev Docs: https://dev.clever.com/docs/sync-testing#testing-with-certification-isd
+### SSO: Session invalidation — FAIL
+User A's session remained active after User B logged in. Each new Clever login must produce a clean session. See [Clever's shared device documentation](https://dev.clever.com/docs/il-security#shared-devices-session-re-authentication-and-session-invalidation).
 
----
-
-## Active Status Formats
-
-Vali understands several common ways applications represent whether a user is active. You don't need to change your data format — Vali will detect whichever convention your app uses:
-
-| Field | How Vali interprets it |
-|---|---|
-| `"status": "active"` | Standard string status |
-| `"is_active": true` | Boolean active flag |
-| `"is_archived": false` | Boolean archive flag (inverted) |
-| `"deleted_at": null` | Soft-delete timestamp — null means active |
-| *(no status field)* | Assumed active if the user was included in the export |
+### SSO tests all failing / timing out
+- Confirm the `#DEMO Certification ISD - Events` district is connected to the partner's app
+- Confirm the `Login URL` in Airtable points to the page with the "Log in with Clever" button
+- Check that the partner's local server is running before tests start
 
 ---
 
-## What Vali Does Not Test
+## Adding a New Test
 
-Vali covers the objective, automatable requirements of the Clever certification process. The following areas require human review via the Clever certification form and are out of scope for Vali:
+Vali uses a test registry pattern — adding a new test requires two steps only:
 
-- Session invalidation on shared devices
-- School year rollover handling
-- Deleted and restored record behavior
-- District onboarding steps and sync ownership
-- Admin permission handling
-- Application icon, supported regions, and other intake fields
-
-These are evaluated by the Clever team as part of the standard certification review after you submit the form.
-
----
-
-## Submitting Your Report
-
-Once Vali shows `overall_status: PASS`, include your `certification_report_*.json` file when you submit the Clever Secure Sync Certification Form. This lets the Clever team verify your technical checks were completed and speeds up the review process.
-
-If you have questions about a failure you can't resolve, reach out to [integrations@clever.com](mailto:integrations@clever.com).
-
----
-
-## For Clever Team Members
-
-### How the sandbox tests work
-
-Vali checks the partner's diagnostic file against a fixed set of records from the Clever sandbox district (`EXPECTED_STATE` in `vali.py`). These are real records in the sandbox and are intentionally chosen to cover edge cases:
-
-- Users with long numeric SIS IDs (potential truncation bugs)
-- Users with very short SIS IDs (potential type mismatch bugs)
-- Non-student roles: one admin, one teacher (catches role-filtering bugs)
-
-### Adding new sandbox test cases
-
-To add a new required user to the edge case suite, add an entry to the `required_users` list in `EXPECTED_STATE` at the top of `vali.py`:
+**1. Write the test function in `vali_core.py`:**
 
 ```python
-{"sis_id": "YOUR_SIS_ID", "name": "Display Name", "role": "student"}  # or "teacher" / "admin"
+def test_my_new_check(config):
+    # ... test logic ...
+    return _result("My check name", "PASS", "Details here.", "Category Name")
 ```
 
-The `role` field is used to generate targeted error messages when that user is missing, so make sure it accurately reflects the user's role in the sandbox district.
+**2. Add it to `TEST_REGISTRY` in `vali_core.py`:**
 
-### Versioning
+```python
+{
+    "fn":               test_my_new_check,
+    "category":         "Category Name",
+    "requires_browser": False,  # True if the test uses Playwright
+    "enabled":          True,
+},
+```
 
-The report includes a `validator_version` field. When making changes that affect test behavior or grading logic, increment the version string in `generate_report()` so Clever can identify which version of Vali produced a given report.
+That's it — the test will run automatically in every future run, appear in the dashboard, and be included in partner mode.
+
+---
+
+## For Team Members: Sandbox Configuration
+
+The sandbox users are configured in `SANDBOX_USERS` at the top of `vali_core.py`. All users belong to the `#DEMO Certification ISD - Events` district. Credentials are stored directly in the file — do not commit this file to a public repository.
+
+To add a new sandbox test user, add an entry to `SANDBOX_USERS` with `clever_id`, `sis_id`, `district_id`, `name`, `role`, `username`, and `password`.
+
+The sparse-profile user used for missing field handling is configured separately in `SPARSE_USER` just below `SANDBOX_USERS`.
+
+---
+
+## Questions
+
+Reach out to the Clever Partnerships / Integrations team at [integrations@clever.com](mailto:integrations@clever.com).
