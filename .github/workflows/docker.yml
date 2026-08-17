@@ -71,22 +71,34 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       # ---------------------------------------------------------------------------
-      # Step 4: Set up Docker Buildx
+      # Step 4: Set up QEMU
       # ---------------------------------------------------------------------------
-      # Buildx is Docker's extended build tooling. It enables build caching,
-      # which significantly speeds up subsequent builds when only code changes
-      # (not dependencies) have been updated.
+      # QEMU enables cross-platform builds on GitHub's amd64 runners.
+      # It emulates arm64 so the runner can build an image that works on
+      # Apple Silicon Macs without needing a native arm64 runner.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      # ---------------------------------------------------------------------------
+      # Step 5: Set up Docker Buildx
+      # ---------------------------------------------------------------------------
+      # Buildx is Docker's extended build tooling. It enables multi-platform
+      # builds and build caching, which significantly speeds up subsequent
+      # builds when only code changes (not dependencies) have been updated.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       # ---------------------------------------------------------------------------
-      # Step 5: Build and push the image
+      # Step 6: Build and push the image
       # ---------------------------------------------------------------------------
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
+          # Build for both Apple Silicon (arm64) and Intel/GitHub runners (amd64).
+          # Docker will automatically pull the right version for each machine.
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Cache layers between builds so unchanged dependency installs
