@@ -1081,4 +1081,9 @@ if __name__ == "__main__":
     print("Opening at http://localhost:5000")
     print("Press Ctrl+C to stop.")
     print()
-    app.run(debug=True, port=5000)
+    # host="0.0.0.0" binds to all network interfaces, which is required
+    # for Docker port mapping to reach Flask from outside the container.
+    # Defaults to 127.0.0.1 for local dev so behaviour is unchanged there.
+    import os
+    host = os.getenv("FLASK_RUN_HOST", "127.0.0.1")
+    app.run(debug=True, host=host, port=5000)
