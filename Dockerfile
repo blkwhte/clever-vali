@@ -39,7 +39,10 @@ RUN playwright install chromium
 # ---------------------------------------------------------------------------
 # Copy application code
 # ---------------------------------------------------------------------------
-# Now we copy everything else. Files listed in .dockerignore are excluded.
+# ARG CACHEBUST forces Docker to invalidate the cache from this point
+# forward, ensuring the latest code is always copied into the image
+# even when dependencies haven't changed.
+ARG CACHEBUST=1
 COPY . .
 
 # ---------------------------------------------------------------------------
