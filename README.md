@@ -303,4 +303,4 @@ The sparse-profile user used for missing field handling is configured separately
 
 ## Questions
 
-Reach out to the Clever Partnerships / Integrations team at [integrations@clever.com](mailto:integrations@clever.com).
+Reach out to the Clever Partner Engineering team at [integrations@clever.com](mailto:integrations@clever.com).
