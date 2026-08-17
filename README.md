@@ -101,17 +101,33 @@ The Secure Sync Airtable base needs the following columns for Vali to write resu
 
 ### Starting the dashboard
 
+**Running locally (Python):**
+
 ```bash
 python3 dashboard.py
 ```
 
 The dashboard will be available at `http://localhost:5000`. Partner mode is at `http://localhost:5000/partner`.
 
+**Running via Docker (recommended for teammates):**
+
+```bash
+docker pull ghcr.io/blkwhte/clever-vali:latest
+docker run --env-file .env -p 5001:5000 ghcr.io/blkwhte/clever-vali:latest
+```
+
+The dashboard will be available at `http://localhost:5001`. Partner mode is at `http://localhost:5001/partner`.
+
+> **Why port 5001?** macOS quietly occupies port 5000 for AirPlay Receiver, which conflicts with Flask. Port 5001 avoids this without requiring any system setting changes.
+
 ---
 
 ## Internal Dashboard
 
 The internal dashboard is for the Clever team. It connects to the Secure Sync Airtable base and shows all partner certification submissions in the sidebar.
+
+- **Local:** `http://localhost:5000`
+- **Docker:** `http://localhost:5001`
 
 **Before running tests on a partner:**
 - Connect the `#DEMO Certification ISD - Events` sandbox district to their Clever application
@@ -133,7 +149,10 @@ The internal dashboard is for the Clever team. It connects to the Secure Sync Ai
 
 ## Partner Mode
 
-Partner mode is a self-service interface at `http://localhost:5000/partner` that partners use to test their own integration.
+Partner mode is a self-service interface that partners use to test their own integration.
+
+- **Local:** `http://localhost:5000/partner`
+- **Docker:** `http://localhost:5001/partner`
 
 The flow has three steps:
 
