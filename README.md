@@ -91,9 +91,7 @@ You can obtain an Airtable Peresonal Access Token (API Token) by following these
 At a minimum, you will need the following scopes: 
 ```
     data.records:read
-    See the data in records
     data.records:write
-    Create, edit, and delete records
 ```
 
 ### Required Airtable columns
