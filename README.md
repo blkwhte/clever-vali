@@ -86,6 +86,15 @@ AIRTABLE_API_TOKEN=your_token_here
 AIRTABLE_SECURE_SYNC_BASE_ID=your_base_id_here
 AIRTABLE_SECURE_SYNC_TABLE_NAME=your_table_name_here
 ```
+You can obtain an Airtable Peresonal Access Token (API Token) by following these instructions: https://support.airtable.com/articles/9934989703-creating-personal-access-tokens
+
+At a minimum, you will need the following scopes: 
+```
+    data.records:read
+    See the data in records
+    data.records:write
+    Create, edit, and delete records
+```
 
 ### Required Airtable columns
 
