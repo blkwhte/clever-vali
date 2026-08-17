@@ -116,7 +116,7 @@ python3 dashboard.py
 
 The dashboard will be available at `http://localhost:5000`. Partner mode is at `http://localhost:5000/partner`.
 
-**Running via Docker (recommended for teammates):**
+**Running via Docker (recommended):**
 
 ```bash
 docker pull ghcr.io/blkwhte/clever-vali:latest
