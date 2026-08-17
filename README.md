@@ -87,6 +87,13 @@ You can generate your own Airtable Personal Access Token by following [these ins
 data.records:read
 data.records:write
 ```
+You can obtain an Airtable Peresonal Access Token (API Token) by following these instructions: https://support.airtable.com/articles/9934989703-creating-personal-access-tokens
+
+At a minimum, you will need the following scopes: 
+```
+    data.records:read
+    data.records:write
+```
 
 ### Required Airtable columns
 
@@ -122,16 +129,9 @@ Navigate to the folder containing your `.env` file, then run:
 docker run --env-file .env -p 5001:5000 ghcr.io/blkwhte/clever-vali:latest
 ```
 
-**3. Open the dashboard**
+The dashboard will be available at `http://localhost:5000`. Partner mode is at `http://localhost:5000/partner`.
 
-- Internal dashboard: `http://localhost:5001`
-- Partner mode: `http://localhost:5001/partner`
-
-> **Why port 5001?** macOS quietly occupies port 5000 for AirPlay Receiver, which conflicts with Flask. Port 5001 avoids this without requiring any system setting changes.
-
-**Stopping the container:** Press `Ctrl+C` in the terminal, or stop it from Docker Desktop.
-
-**Getting updates:** When a new version is released, pull again and restart:
+**Running via Docker (recommended for teammates):**
 
 ```bash
 docker pull ghcr.io/blkwhte/clever-vali:latest
