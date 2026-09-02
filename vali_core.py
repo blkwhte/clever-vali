@@ -89,7 +89,7 @@ SPARSE_USER = {
     "clever_id":   "58da8c63d7dc0ca0680003ed",
     "sis_id":      "100095233",
     "district_id": "58da8a43cc70ab00017a1a87",
-    "name":        "Sparse Test User",
+    "name":        "Steve Ziemann",
     "role":        "student",
     "username":    "100095233",
     "password":    "100095233",
